@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "id": "minenav",
+  "version": "${version}",
+  "name": "minenav",
+  "description": "",
+  "authors": [],
+  "contact": {},
+  "license": "All-Rights-Reserved",
+  "icon": "assets/minenav/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "fabric-datagen": [
+      "org.ratmuds.minenav.client.MinenavDataGenerator"
+    ],
+    "client": [
+      "org.ratmuds.minenav.client.MinenavClient"
+    ],
+    "main": [
+      "org.ratmuds.minenav.Minenav"
+    ]
+  },
+  "mixins": [
+    "minenav.mixins.json",
+    {
+      "config": "minenav.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=${loader_version}",
+    "fabric-api": "*",
+    "minecraft": "${minecraft_version}"
+  }
+}
