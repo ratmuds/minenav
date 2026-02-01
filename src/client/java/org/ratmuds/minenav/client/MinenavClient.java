@@ -3,10 +3,13 @@ package org.ratmuds.minenav.client;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.world.WorldRenderContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.List;
 
 public class MinenavClient implements ClientModInitializer {
+    public static final Logger LOGGER = LoggerFactory.getLogger("minenav");
     private static MinenavClient instance;
     private CubeRenderer cubeRenderer;
 

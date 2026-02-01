@@ -30,6 +30,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.OptionalDouble;
 import java.util.OptionalInt;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 public class CubeRenderer {
     private static final RenderPipeline FILLED_THROUGH_WALLS = RenderPipelines.register(
@@ -46,7 +47,7 @@ public class CubeRenderer {
     private static ByteBufferBuilder allocator = null;
     private BufferBuilder buffer;
     private MappableRingBuffer vertexBuffer;
-    private final List<CubeData> cubes = new ArrayList<>();
+    private final List<CubeData> cubes = new CopyOnWriteArrayList<>();
 
     public CubeRenderer() {
         this.allocator = new ByteBufferBuilder(RenderType.SMALL_BUFFER_SIZE);
