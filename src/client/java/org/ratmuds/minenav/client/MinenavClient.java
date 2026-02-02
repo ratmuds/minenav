@@ -12,9 +12,26 @@ public class MinenavClient implements ClientModInitializer {
     public static final Logger LOGGER = LoggerFactory.getLogger("minenav");
     private static MinenavClient instance;
     private CubeRenderer cubeRenderer;
+    private boolean isNavigating = false;
 
     public static MinenavClient getInstance() {
         return instance;
+    }
+
+    public boolean isNavigating() {
+        return isNavigating;
+    }
+
+    public void setNavigating(boolean navigating) {
+        this.isNavigating = navigating;
+        if (!navigating) {
+            clearCubes();
+            // Reset keys when stopping
+            if (net.minecraft.client.Minecraft.getInstance().options != null) {
+                net.minecraft.client.Minecraft.getInstance().options.keyUp.setDown(false);
+                net.minecraft.client.Minecraft.getInstance().options.keyJump.setDown(false);
+            }
+        }
     }
 
     @Override

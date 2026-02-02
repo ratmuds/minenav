@@ -19,7 +19,6 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
 import static org.ratmuds.minenav.client.AStar3D.findPath;
@@ -40,14 +39,23 @@ public class InteractionMixin {
 
         // Get the client instance
         MinenavClient client = MinenavClient.getInstance();
+        
+        if (!client.isNavigating()) return;
 
         // Path find from (0, -50, 0) to (10, -50, 10)
-        Vec3 start = new Vec3(0, -60, 0);
+        Vec3 start = player.position();
         Vec3 end = new Vec3(10, -60, 10);
         // Bounds must include start/end Y and account for 2-block height check (y+1)
         // Need at least 3 Y levels: feet level, head level (y+1), and one below for ground
         Vec3 pathFindBoundStart = new Vec3(-10, -61, -10);
         Vec3 pathFindBoundEnd = new Vec3(21, -55, 21);  // Extended Y range for head clearance check
+
+        // Check if start is inside bounds
+        if (start.x < pathFindBoundStart.x || start.x > pathFindBoundEnd.x ||
+            start.y < pathFindBoundStart.y || start.y > pathFindBoundEnd.y ||
+            start.z < pathFindBoundStart.z || start.z > pathFindBoundEnd.z) {
+            return;
+        }
 
         // Calculate array dimensions (must be at least 1 in each dimension)
         int sizeX = (int) Math.abs(pathFindBoundEnd.x - pathFindBoundStart.x);
@@ -77,9 +85,9 @@ public class InteractionMixin {
                     Block block = level.getBlockState(new BlockPos(worldX, worldY, worldZ)).getBlock();
 
                     if (block instanceof AirBlock) {
-                        costs[x][y][z] = 1.0;  // Use small positive cost, not 0!
+                        costs[x][y][z] = 1.0;  // Use small positive cost, not 0
                     } else {
-                        costs[x][y][z] = Double.POSITIVE_INFINITY;  // Use infinity for unwalkable
+                        costs[x][y][z] = 100.0f; //Double.POSITIVE_INFINITY;  // Use infinity for unwalkable
                         //cubes.add(CubeData.create(worldX, worldY, worldZ, 1f, 1f, 0f, 0f, 0.75f));
                     }
 
@@ -128,10 +136,30 @@ public class InteractionMixin {
         client.clearCubes();
         client.renderCubes(cubes);
 
-        // Example: Draw a line from player's feet to 10 blocks above
-        //Vec3 start = Vec3.ZERO;
-        //Vec3 end = player.position().add(0, 300, 0);
-        //LineRenderer.drawLine(start, end, 0xFF00FF00); // Green line (0xAARRGGBB format)
+        // Navigate autonomously using the path
+        BlockPos pos = new BlockPos(
+                (int)(pathFindBoundStart.x + path.get(1)[0]),
+                (int)(pathFindBoundStart.y + path.get(1)[1]),
+                (int)(pathFindBoundStart.z + path.get(1)[2])
+        ); // Get NEXT position in path, not the one we are on
+
+        // Rotate player
+        double dx = pos.getX() + 0.5 - player.position().x;
+        double dz = pos.getZ() + 0.5 - player.position().z;
+        double degrees = -Math.toDegrees(Math.atan2(dx, dz));
+        player.setYRot((float) degrees);
+
+        // Use controls
+
+        // Check if in front
+        if (degrees < 10 || degrees > 350) {
+            mc.options.keyUp.setDown(true);
+        }
+
+        // Check if jump needed
+        if (player.onGround() && player.position().y < pos.getY()) {
+            mc.options.keyJump.setDown(true);
+        }
 
         //mc.options.keyUp.setDown(true);
     }
