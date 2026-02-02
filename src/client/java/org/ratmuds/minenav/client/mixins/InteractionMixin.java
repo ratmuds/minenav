@@ -3,6 +3,7 @@ package org.ratmuds.minenav.client.mixins;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
+import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.world.WorldlyContainer;
 import net.minecraft.world.entity.player.Player;
@@ -20,17 +21,21 @@ import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.ratmuds.minenav.client.AStar3D.findPath;
 
 @Mixin(Player.class)
 public class InteractionMixin {
     private static int tickCounter = 0;
+    private static List<int[]> path;
+    private static Vec3 pathOrigin;
+    private static AtomicBoolean isCalculating = new AtomicBoolean(false);
 
     @Inject(method = "tick", at = @At("HEAD"))
     private void onTick(CallbackInfo ci) {
         tickCounter++;
-        if (tickCounter % 20 != 0) return;
 
         Minecraft mc = Minecraft.getInstance();
         if (mc == null || mc.player == null || mc.level == null) return;
@@ -39,109 +44,142 @@ public class InteractionMixin {
 
         // Get the client instance
         MinenavClient client = MinenavClient.getInstance();
-        
-        if (!client.isNavigating()) return;
-
-        // Path find from (0, -50, 0) to (10, -50, 10)
-        Vec3 start = player.position();
-        Vec3 end = new Vec3(10, -60, 10);
-        // Bounds must include start/end Y and account for 2-block height check (y+1)
-        // Need at least 3 Y levels: feet level, head level (y+1), and one below for ground
-        Vec3 pathFindBoundStart = new Vec3(-10, -61, -10);
-        Vec3 pathFindBoundEnd = new Vec3(21, -55, 21);  // Extended Y range for head clearance check
-
-        // Check if start is inside bounds
-        if (start.x < pathFindBoundStart.x || start.x > pathFindBoundEnd.x ||
-            start.y < pathFindBoundStart.y || start.y > pathFindBoundEnd.y ||
-            start.z < pathFindBoundStart.z || start.z > pathFindBoundEnd.z) {
+        if (!client.isNavigating()) {
+            path = null;
+            pathOrigin = null;
             return;
         }
 
-        // Calculate array dimensions (must be at least 1 in each dimension)
-        int sizeX = (int) Math.abs(pathFindBoundEnd.x - pathFindBoundStart.x);
-        int sizeY = (int) Math.abs(pathFindBoundEnd.y - pathFindBoundStart.y);
-        int sizeZ = (int) Math.abs(pathFindBoundEnd.z - pathFindBoundStart.z);
+        // Get effective start and end
+        Vec3 start = player.position();
+        Vec3 end = client.getEndPos();
 
-        // Ensure a minimum size of 1 for each dimension
-        sizeX = Math.max(sizeX, 1);
-        sizeY = Math.max(sizeY, 1);
-        sizeZ = Math.max(sizeZ, 1);
+        if (end == null) {
+            // No end set, can't navigate
+            return;
+        }
 
-        // Setup costs
-        double[][][] costs = new double[sizeX][sizeY][sizeZ];
+        // Check if player near end
+        if (start.distanceTo(end) < 3) {
+            client.setNavigating(false);
+            player.displayClientMessage(Component.literal("Completed pathfinding!"), true);
+            return;
+        }
 
-        List<CubeData> cubes = new ArrayList<>();
+        // Automatic Boundaries
+        double padding = 20.0;
+        Vec3 pathFindBoundStart = new Vec3(
+                Math.min(start.x, end.x) - padding,
+                Math.min(start.y, end.y) - padding,
+                Math.min(start.z, end.z) - padding
+        );
+        Vec3 pathFindBoundEnd = new Vec3(
+                Math.max(start.x, end.x) + padding,
+                Math.max(start.y, end.y) + padding, // Extended Y range
+                Math.max(start.z, end.z) + padding
+        );
 
-        // Loop through all positions in the search bounds
-        for (int x = 0; x < sizeX; x++) {
-            for (int y = 0; y < sizeY; y++) {
-                for (int z = 0; z < sizeZ; z++) {
-                    // Convert array indices to world coordinates
-                    int worldX = (int) pathFindBoundStart.x + x;
-                    int worldY = (int) pathFindBoundStart.y + y;
-                    int worldZ = (int) pathFindBoundStart.z + z;
+        if (tickCounter % 5 == 0 && !isCalculating.get()) {
+            
+            // Calculate array dimensions (must be at least 1 in each dimension)
+            int sizeX = (int) Math.abs(pathFindBoundEnd.x - pathFindBoundStart.x);
+            int sizeY = (int) Math.abs(pathFindBoundEnd.y - pathFindBoundStart.y);
+            int sizeZ = (int) Math.abs(pathFindBoundEnd.z - pathFindBoundStart.z);
 
-                    // Fetch block in that position
-                    Block block = level.getBlockState(new BlockPos(worldX, worldY, worldZ)).getBlock();
+            // Ensure a minimum size of 1 for each dimension
+            sizeX = Math.max(sizeX, 1);
+            sizeY = Math.max(sizeY, 1);
+            sizeZ = Math.max(sizeZ, 1);
 
-                    if (block instanceof AirBlock) {
-                        costs[x][y][z] = 1.0;  // Use small positive cost, not 0
-                    } else {
-                        costs[x][y][z] = 100.0f; //Double.POSITIVE_INFINITY;  // Use infinity for unwalkable
-                        //cubes.add(CubeData.create(worldX, worldY, worldZ, 1f, 1f, 0f, 0f, 0.75f));
+            // Setup costs
+            double[][][] costs = new double[sizeX][sizeY][sizeZ];
+            
+            // Generate costs on main thread (safe block access)
+            for (int x = 0; x < sizeX; x++) {
+                for (int y = 0; y < sizeY; y++) {
+                    for (int z = 0; z < sizeZ; z++) {
+                        // Convert array indices to world coordinates
+                        int worldX = (int) pathFindBoundStart.x + x;
+                        int worldY = (int) pathFindBoundStart.y + y;
+                        int worldZ = (int) pathFindBoundStart.z + z;
+
+                        // Fetch block in that position
+                        Block block = level.getBlockState(new BlockPos(worldX, worldY, worldZ)).getBlock();
+
+                        if (block instanceof AirBlock) {
+                            costs[x][y][z] = 10.0;  // Use small positive cost, not 0
+
+                            // Check if block is floating
+                            if (worldY > player.position().y && level.getBlockState(new BlockPos(worldX, worldY - 1, worldZ)).getBlock() instanceof AirBlock) {
+                                costs[x][y][z] = 30.0;
+
+                                // Check if block if extra floating
+                                if (level.getBlockState(new BlockPos(worldX, worldY - 2, worldZ)).getBlock() instanceof AirBlock) {
+                                    costs[x][y][z] = 70.0;
+                                }
+                            } else if (worldY < player.position().y) {
+                                costs[x][y][z] = 20.0;
+                            }
+                        } else {
+                            costs[x][y][z] = Double.POSITIVE_INFINITY;  // Use infinity for unwalkable
+                        }
                     }
-
-                    // Log position, block type, and cost
-                    //MinenavClient.LOGGER.info(String.format("[MineNav] (%d, %d, %d) - %s - %.2f", worldX, worldY, worldZ, block.getClass().getSimpleName(), costs[x][y][z]));
                 }
             }
+
+            // Convert world coordinates to array indices for pathfinding
+            int startX = (int) (start.x - pathFindBoundStart.x);
+            int startY = (int) (start.y - pathFindBoundStart.y);
+            int startZ = (int) (start.z - pathFindBoundStart.z);
+            int endX = (int) (end.x - pathFindBoundStart.x);
+            int endY = (int) (end.y - pathFindBoundStart.y);
+            int endZ = (int) (end.z - pathFindBoundStart.z);
+
+            // Start async calculation
+            isCalculating.set(true);
+            CompletableFuture.supplyAsync(() -> {
+                return findPath(costs, startX, startY, startZ, endX, endY, endZ);
+            }).thenAcceptAsync(newPath -> {
+                path = newPath;
+                pathOrigin = pathFindBoundStart;
+                isCalculating.set(false);
+
+                if (path != null) {
+                    List<CubeData> cubes = new ArrayList<>();
+                    for (int[] coords : path) {
+                        // Convert array indices back to world coordinates
+                        float worldX = (float) (pathOrigin.x + coords[0]);
+                        float worldY = (float) (pathOrigin.y + coords[1]);
+                        float worldZ = (float) (pathOrigin.z + coords[2]);
+                        cubes.add(CubeData.create(worldX, worldY, worldZ, 1f, 0f, 0f, 1f, 0.75f));
+                    }
+                    client.clearCubes();
+                    client.renderCubes(cubes);
+                }
+            }, mc);
         }
 
-        // Convert world coordinates to array indices for pathfinding
-        int startX = (int) (start.x - pathFindBoundStart.x);
-        int startY = (int) (start.y - pathFindBoundStart.y);
-        int startZ = (int) (start.z - pathFindBoundStart.z);
-        int endX = (int) (end.x - pathFindBoundStart.x);
-        int endY = (int) (end.y - pathFindBoundStart.y);
-        int endZ = (int) (end.z - pathFindBoundStart.z);
+        if (path == null || pathOrigin == null || path.size() < 2) return;
 
-        // Log pathfinding bounds
-        MinenavClient.LOGGER.info(String.format("[MineNav] Pathfinding bounds: Start (%d, %d, %d), End (%d, %d, %d)",
-                startX, startY, startZ,
-                endX, endY, endZ));
-        MinenavClient.LOGGER.info(String.format("[MineNav] Array dimensions: (%d, %d, %d)", sizeX, sizeY, sizeZ));
+        // Check if we should advance to the next path
+        Vec3 nextNodePos = new Vec3(pathOrigin.x + path.get(1)[0], pathOrigin.y + path.get(1)[1], pathOrigin.z + path.get(1)[2]);
+        if (nextNodePos.distanceTo(player.position()) < 1.5) {
+            path.removeFirst();
+        }
 
-        // Path find
-        List<int[]> path = findPath(costs, startX, startY, startZ, endX, endY, endZ);
+        if (path.size() < 2) {
+            player.displayClientMessage(Component.literal("Reached end of current path..."), true);
+        }
         
-        // Remove all old cubes and render new ones (do this regardless of path result)
-        client.clearCubes();
-        client.renderCubes(cubes);
-        
-        if (path == null) {
-            MinenavClient.LOGGER.info("[MineNav] No path found");
-            return;
-        }
-
-        MinenavClient.LOGGER.info(String.format("[MineNav] Path generated with %d elements", path.size()));
-        //List<CubeData> cubes = new ArrayList<>();
-        for (int[] coords : path) {
-            // Convert array indices back to world coordinates
-            float worldX = (float) (pathFindBoundStart.x + coords[0]);
-            float worldY = (float) (pathFindBoundStart.y + coords[1]);
-            float worldZ = (float) (pathFindBoundStart.z + coords[2]);
-            cubes.add(CubeData.create(worldX, worldY, worldZ, 1f, 0f, 0f, 1f, 0.75f));
-        }
-
-        client.clearCubes();
-        client.renderCubes(cubes);
+        // Re-evaluate next node after potential removal
+        nextNodePos = new Vec3(pathOrigin.x + path.get(1)[0], pathOrigin.y + path.get(1)[1], pathOrigin.z + path.get(1)[2]);
 
         // Navigate autonomously using the path
         BlockPos pos = new BlockPos(
-                (int)(pathFindBoundStart.x + path.get(1)[0]),
-                (int)(pathFindBoundStart.y + path.get(1)[1]),
-                (int)(pathFindBoundStart.z + path.get(1)[2])
-        ); // Get NEXT position in path, not the one we are on
+                (int)nextNodePos.x,
+                (int)nextNodePos.y,
+                (int)nextNodePos.z
+        ); 
 
         // Rotate player
         double dx = pos.getX() + 0.5 - player.position().x;
@@ -159,8 +197,18 @@ public class InteractionMixin {
         // Check if jump needed
         if (player.onGround() && player.position().y < pos.getY()) {
             mc.options.keyJump.setDown(true);
-        }
+            mc.options.keyUse.setDown(false);
+        } else if (!player.onGround() && Math.abs(player.position().y - pos.getY()) > 1) {
+            player.setXRot(90);
+            mc.options.keyUse.setDown(true);
+        } else {
+            mc.options.keyUse.setDown(false);
 
-        //mc.options.keyUp.setDown(true);
+            if (player.getRotationVector().x == 90) {
+                player.setXRot(0);
+            }
+        }
+        
+        mc.options.keyUp.setDown(true);
     }
 }
