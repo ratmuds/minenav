@@ -6,10 +6,13 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Vec3i;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
+import net.minecraft.world.WorldlyContainer;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.block.AirBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.storage.WorldData;
+import org.ratmuds.minenav.client.AStar3D;
 import org.ratmuds.minenav.client.CubeData;
 import org.ratmuds.minenav.client.MinenavClient;
 import org.spongepowered.asm.mixin.Mixin;
@@ -26,27 +29,10 @@ import java.util.concurrent.ThreadLocalRandom;
 
 import static org.ratmuds.minenav.client.AStar3D.findPath;
 
-class Action {
-    public static final int WALK = 0;
-    public static final int JUMP = 1;
-    public static final int PILLAR = 2;
-    public static final int BRIDGE = 3;
-    public static final int DROP = 4;
-
-    public Vec3i pos;
-    public int action;
-
-    public Action(Vec3i pos, int action) {
-        this.pos = pos;
-        this.action = action;
-    }
-}
-
 @Mixin(Player.class)
 public class InteractionMixin {
     private static int tickCounter = 0;
     private static List<int[]> path;
-    private static List<Action> actionPath;
     private static Vec3 pathOrigin;
     private static AtomicBoolean isCalculating = new AtomicBoolean(false);
 
@@ -76,7 +62,6 @@ public class InteractionMixin {
         MinenavClient client = MinenavClient.getInstance();
         if (!client.isNavigating()) {
             path = null;
-            actionPath = null;
             pathOrigin = null;
             return;
         }
@@ -111,16 +96,16 @@ public class InteractionMixin {
         );
 
         if (tickCounter % 5 == 0 && !isCalculating.get()) {
-            int originX = (int) Math.floor(pathFindBoundStart.x);
-            int originY = (int) Math.floor(pathFindBoundStart.y);
-            int originZ = (int) Math.floor(pathFindBoundStart.z);
-            int maxX = (int) Math.floor(pathFindBoundEnd.x);
-            int maxY = (int) Math.floor(pathFindBoundEnd.y);
-            int maxZ = (int) Math.floor(pathFindBoundEnd.z);
 
-            int sizeX = Math.max(maxX - originX + 1, 1);
-            int sizeY = Math.max(maxY - originY + 1, 1);
-            int sizeZ = Math.max(maxZ - originZ + 1, 1);
+            // Calculate array dimensions (must be at least 1 in each dimension)
+            int sizeX = (int) Math.abs(pathFindBoundEnd.x - pathFindBoundStart.x);
+            int sizeY = (int) Math.abs(pathFindBoundEnd.y - pathFindBoundStart.y);
+            int sizeZ = (int) Math.abs(pathFindBoundEnd.z - pathFindBoundStart.z);
+
+            // Ensure a minimum size of 1 for each dimension
+            sizeX = Math.max(sizeX, 1);
+            sizeY = Math.max(sizeY, 1);
+            sizeZ = Math.max(sizeZ, 1);
 
             // Setup costs
             double[][][] costs = new double[sizeX][sizeY][sizeZ];
@@ -130,9 +115,9 @@ public class InteractionMixin {
                 for (int y = 0; y < sizeY; y++) {
                     for (int z = 0; z < sizeZ; z++) {
                         // Convert array indices to world coordinates
-                        int worldX = originX + x;
-                        int worldY = originY + y;
-                        int worldZ = originZ + z;
+                        int worldX = (int) pathFindBoundStart.x + x;
+                        int worldY = (int) pathFindBoundStart.y + y;
+                        int worldZ = (int) pathFindBoundStart.z + z;
 
                         // Fetch block in that position
                         Block block = level.getBlockState(new BlockPos(worldX, worldY, worldZ)).getBlock();
@@ -161,91 +146,43 @@ public class InteractionMixin {
             }
 
             // Convert world coordinates to array indices for pathfinding
-            int startX = (int) Math.floor(start.x) - originX;
-            int startY = (int) Math.floor(start.y) - originY;
-            int startZ = (int) Math.floor(start.z) - originZ;
-            int endX = (int) Math.floor(end.x) - originX;
-            int endY = (int) Math.floor(end.y) - originY;
-            int endZ = (int) Math.floor(end.z) - originZ;
+            int startX = (int) (start.x - pathFindBoundStart.x);
+            int startY = (int) (start.y - pathFindBoundStart.y);
+            int startZ = (int) (start.z - pathFindBoundStart.z);
+            int endX = (int) (end.x - pathFindBoundStart.x);
+            int endY = (int) (end.y - pathFindBoundStart.y);
+            int endZ = (int) (end.z - pathFindBoundStart.z);
 
             // Start async calculation
             isCalculating.set(true);
-            Vec3 newPathOrigin = new Vec3(originX, originY, originZ);
-            CompletableFuture
-                    .supplyAsync(() -> findPath(costs, startX, startY, startZ, endX, endY, endZ))
-                    .handleAsync((newPath, ex) -> {
-                        isCalculating.set(false);
-                        if (ex != null) {
-                            path = null;
-                            actionPath = null;
-                            pathOrigin = null;
-                            player.displayClientMessage(Component.literal("Pathfinding error: " + ex.getClass().getSimpleName()), true);
-                            return null;
-                        }
+            CompletableFuture.supplyAsync(() -> {
+                return findPath(costs, startX, startY, startZ, endX, endY, endZ);
+            }).thenAcceptAsync(newPath -> {
+                path = newPath;
+                pathOrigin = pathFindBoundStart;
+                isCalculating.set(false);
 
-                        path = newPath;
-                        pathOrigin = newPathOrigin;
-
-                        if (path == null) {
-                            actionPath = null;
-                            client.clearCubes();
-                            return null;
-                        }
-
-                        List<CubeData> cubes = new ArrayList<>();
-                        List<Action> newActionPath = new ArrayList<>();
-                        for (int i = 0; i < path.size(); i++) {
-                            int[] coords = path.get(i);
-
-                            int action = Action.WALK;
-                            if (i < path.size() - 1) {
-                                int[] next = path.get(i + 1);
-                                int dx = next[0] - coords[0];
-                                int dy = next[1] - coords[1];
-                                int dz = next[2] - coords[2];
-
-                                if (dy > 0) {
-                                    action = (dx == 0 && dz == 0) ? Action.PILLAR : Action.JUMP;
-                                } else if (dy < 0) {
-                                    action = Action.DROP;
-                                } else {
-                                    BlockPos nextWorld = new BlockPos(
-                                            (int) (pathOrigin.x + next[0]),
-                                            (int) (pathOrigin.y + next[1]),
-                                            (int) (pathOrigin.z + next[2])
-                                    );
-                                    if (level.getBlockState(nextWorld.below()).getBlock() instanceof AirBlock) {
-                                        action = Action.BRIDGE;
-                                    }
-                                }
-                            }
-
-                            float worldX = (float) (pathOrigin.x + coords[0]);
-                            float worldY = (float) (pathOrigin.y + coords[1]);
-                            float worldZ = (float) (pathOrigin.z + coords[2]);
-                            float[] rgb = colorForAction(action);
-                            cubes.add(CubeData.create(worldX, worldY, worldZ, 1f, rgb[0], rgb[1], rgb[2], 0.75f));
-
-                            newActionPath.add(new Action(new Vec3i(coords[0], coords[1], coords[2]), action));
-                        }
-
-                        actionPath = newActionPath;
-                        client.clearCubes();
-                        client.renderCubes(cubes);
-                        return null;
-                    }, mc);
+                if (path != null) {
+                    List<CubeData> cubes = new ArrayList<>();
+                    for (int[] coords : path) {
+                        // Convert array indices back to world coordinates
+                        float worldX = (float) (pathOrigin.x + coords[0]);
+                        float worldY = (float) (pathOrigin.y + coords[1]);
+                        float worldZ = (float) (pathOrigin.z + coords[2]);
+                        cubes.add(CubeData.create(worldX, worldY, worldZ, 1f, 0f, 0f, 1f, 0.75f));
+                    }
+                    client.clearCubes();
+                    client.renderCubes(cubes);
+                }
+            }, mc);
         }
 
         if (path == null || pathOrigin == null || path.size() < 2) return;
 
         // Check if we should advance to the next path
-        Vec3 nextNodePos = new Vec3(
-                pathOrigin.x + path.get(1)[0] + 0.5,
-                pathOrigin.y + path.get(1)[1],
-                pathOrigin.z + path.get(1)[2] + 0.5
-        );
+        Vec3 nextNodePos = new Vec3(pathOrigin.x + path.get(1)[0], pathOrigin.y + path.get(1)[1], pathOrigin.z + path.get(1)[2]);
         if (nextNodePos.distanceTo(player.position()) < 1.5) {
-            path.remove(0);
+            path.removeFirst();
         }
 
         if (path.size() < 2) {
@@ -254,17 +191,13 @@ public class InteractionMixin {
         }
 
         // Re-evaluate next node after potential removal
-        nextNodePos = new Vec3(
-                pathOrigin.x + path.get(1)[0] + 0.5,
-                pathOrigin.y + path.get(1)[1],
-                pathOrigin.z + path.get(1)[2] + 0.5
-        );
+        nextNodePos = new Vec3(pathOrigin.x + path.get(1)[0], pathOrigin.y + path.get(1)[1], pathOrigin.z + path.get(1)[2]);
 
         // Navigate autonomously using the path
         BlockPos pos = new BlockPos(
-                (int) Math.floor(nextNodePos.x),
-                (int) Math.floor(nextNodePos.y),
-                (int) Math.floor(nextNodePos.z)
+                (int)nextNodePos.x,
+                (int)nextNodePos.y,
+                (int)nextNodePos.z
         );
 
         // Rotate player
@@ -273,22 +206,30 @@ public class InteractionMixin {
         double degrees = -Math.toDegrees(Math.atan2(dx, dz));
         player.setYRot(wrapYawDegrees(degrees));
 
-        mc.options.keyUp.setDown(false);
-        mc.options.keyDown.setDown(false);
+        // Reset controls
+        if (level.getBlockState(pos.below()).getBlock() instanceof AirBlock) {
+            mc.options.keyUp.setDown(false);
+            bridge(mc, player, level, pos, pathFindBoundStart.x, pathFindBoundStart.y, pathFindBoundStart.z);
+
+            return;
+        } else {
+            mc.options.keyUp.setDown(true);
+            player.displayClientMessage(Component.literal("Navigating... (" + path.size() + " waypoints left)"), true);
+        }
+
         mc.options.keyJump.setDown(false);
         mc.options.keyShift.setDown(false);
         mc.options.keyUse.setDown(false);
+        mc.options.keyDown.setDown(false);
 
         // Check if jump needed
         if (player.onGround() && player.position().y < pos.getY()) {
-            mc.options.keyUp.setDown(true);
             mc.options.keyJump.setDown(true);
             player.setXRot(90);
             mc.options.keyUse.setDown(true);
 
             player.displayClientMessage(Component.literal("Jumping... (" + path.size() + " waypoints left)"), true);
-        } else if (!player.onGround() && Math.abs(player.position().y - pos.getY()) > 0.5) {
-            mc.options.keyUp.setDown(true);
+        } else if (!player.onGround() && Math.abs(player.position().y - pos.getY()) > 1) {
             if (lastSolidBlockBelow != null) {
                 aimAtBlockTop(player, lastSolidBlockBelow);
             } else {
@@ -298,77 +239,103 @@ public class InteractionMixin {
 
             player.displayClientMessage(Component.literal("Placing block underneath... (" + path.size() + " waypoints left)"), true);
         } else {
-            mc.options.keyUp.setDown(true);
-            if (player.getXRot() > 80.0f) {
+            mc.options.keyUse.setDown(false);
+
+            if (player.getRotationVector().x == 90) {
                 player.setXRot(0);
             }
 
             // Check if we need to bridge (floating blocks on same Y level)
-            if (player.onGround() && level.getBlockState(pos.below()).getBlock() instanceof AirBlock) {
-                float bridgeYaw = wrapYawDegrees(degrees + 180.0);
-                player.setYRot(bridgeYaw);
-
-                // Bridging requires a very unique control scheme :)
-                mc.options.keyShift.setDown(true);
-                mc.options.keyUp.setDown(false);
-                mc.options.keyDown.setDown(true);
-                mc.options.keyJump.setDown(false);
-                mc.options.keyUse.setDown(true);
-
-                // Get block player is standing on
-                BlockPos posBelow = player.getBlockPosBelowThatAffectsMyMovement();
-                BlockState stateBelow = level.getBlockState(posBelow);
-                Block blockBelow = stateBelow.getBlock();
-
-                if (!(blockBelow instanceof AirBlock)) {
-                    lastSolidBlockBelow = posBelow;
-                }
-
-                if (lastSolidBlockBelow != null) {
-                    aimPitchAtBlockTop(player, lastSolidBlockBelow);
-                } else {
-                    player.setXRot(ThreadLocalRandom.current().nextInt(80, 90));
-                }
-
-                String blockName = blockBelow.getDescriptionId();
-                MutableComponent message = Component.literal("Bridging from ").append(Component.literal(blockName)).append(Component.literal("... (" + path.size() + " waypoints left)"));
-                player.displayClientMessage(message, true);
-
-                // Look slightly below block
-                Vec3 currentPos = player.position();
-
-                // Bridge fallback check
-                if (lastBridgePos != null) {
-                    double movedX = currentPos.x - lastBridgePos.x;
-                    double movedZ = currentPos.z - lastBridgePos.z;
-                    double horizontalMoved = Math.sqrt((movedX * movedX) + (movedZ * movedZ));
-                    if (horizontalMoved < 0.005) {
-                        bridgeNoMoveTicks++;
-                    } else {
-                        bridgeNoMoveTicks = 0;
-                        bridgeFallbackActive = false;
-                    }
-                }
-                lastBridgePos = currentPos;
-
-                if (!bridgeFallbackActive && bridgeNoMoveTicks >= 20) {
-                    bridgeFallbackActive = true;
-                    player.displayClientMessage(Component.literal("Bridge fallback activated (stuck ~1s)"), true);
-                }
-
-                if (bridgeFallbackActive) {
-                    dx = (posBelow.getX() + 0.5) - player.position().x;
-                    dz = (posBelow.getZ() + 0.5) - player.position().z;
-                    double fallbackDegrees = -Math.toDegrees(Math.atan2(dx, dz));
-                    player.setYRot(wrapYawDegrees(fallbackDegrees));
-                    player.setXRot(ThreadLocalRandom.current().nextInt(75, 90));
-                }
+            if (player.onGround() && level.getBlockState(pos.below()).getBlock() instanceof AirBlock && level.getBlockState(pos.subtract(new Vec3i(0, 2, 0))).getBlock() instanceof AirBlock) {
+                bridge(mc, player, level, pos, pathFindBoundStart.x, pathFindBoundStart.y, pathFindBoundStart.z);
             } else {
                 lastBridgePos = null;
                 bridgeNoMoveTicks = 0;
                 bridgeFallbackActive = false;
-                player.displayClientMessage(Component.literal("Navigating... (" + path.size() + " waypoints left)"), true);
             }
+        }
+    }
+
+    private static void bridge(Minecraft mc, Player player, ClientLevel level, BlockPos pos, double startX, double startY, double startZ) {
+        double dx = pos.getX() + 0.5 - player.position().x;
+        double dz = pos.getZ() + 0.5 - player.position().z;
+        double degrees = -Math.toDegrees(Math.atan2(dx, dz));
+        player.setYRot(wrapYawDegrees(degrees));
+
+        float bridgeYaw = wrapYawDegrees(degrees + 180.0);
+        player.setYRot(bridgeYaw);
+
+        // Bridging requires a very unique control scheme :)
+        mc.options.keyShift.setDown(true);
+        mc.options.keyUp.setDown(false);
+        mc.options.keyDown.setDown(true);
+        mc.options.keyJump.setDown(false);
+        mc.options.keyUse.setDown(true);
+
+        // Get block player is standing on
+        BlockPos posBelow = player.getBlockPosBelowThatAffectsMyMovement();
+        BlockState stateBelow = level.getBlockState(posBelow);
+        Block blockBelow = stateBelow.getBlock();
+
+        if (!(blockBelow instanceof AirBlock)) {
+            lastSolidBlockBelow = posBelow;
+        }
+
+        if (lastSolidBlockBelow != null) {
+            aimPitchAtBlockTop(player, lastSolidBlockBelow);
+        } else {
+            player.setXRot(80);
+        }
+
+        if (path.size() > 3 && path.get(2)[1] + startY > player.getY()) {
+            String blockName = blockBelow.getDescriptionId();
+            MutableComponent message = Component.literal("Building up from ").append(Component.literal(blockName)).append(Component.literal("... (" + path.size() + " waypoints left)"));
+            player.displayClientMessage(message, true);
+
+            player.setXRot(90);
+
+            mc.options.keyJump.setDown(true);
+            mc.options.keyShift.setDown(false);
+            mc.options.keyUse.setDown(true);
+            mc.options.keyDown.setDown(false);
+            mc.options.keyUp.setDown(false);
+
+            return;
+
+        } else {
+            String blockName = blockBelow.getDescriptionId();
+            MutableComponent message = Component.literal("Bridging from ").append(Component.literal(blockName)).append(Component.literal("... (" + path.size() + " waypoints left)"));
+            player.displayClientMessage(message, true);
+        }
+
+        // Look slightly below block
+        Vec3 currentPos = player.position();
+
+        // Bridge fallback check
+        if (lastBridgePos != null) {
+            double movedX = currentPos.x - lastBridgePos.x;
+            double movedZ = currentPos.z - lastBridgePos.z;
+            double horizontalMoved = Math.sqrt((movedX * movedX) + (movedZ * movedZ));
+            if (horizontalMoved < 0.005) {
+                bridgeNoMoveTicks++;
+            } else {
+                bridgeNoMoveTicks = 0;
+                bridgeFallbackActive = false;
+            }
+        }
+        lastBridgePos = currentPos;
+
+        if (!bridgeFallbackActive && bridgeNoMoveTicks >= 20) {
+            bridgeFallbackActive = true;
+            player.displayClientMessage(Component.literal("Bridge fallback activated (stuck ~1s)"), true);
+        }
+
+        if (bridgeFallbackActive) {
+            dx = (posBelow.getX() + 0.5) - player.position().x;
+            dz = (posBelow.getZ() + 0.5) - player.position().z;
+            double fallbackDegrees = -Math.toDegrees(Math.atan2(dx, dz));
+            player.setYRot(wrapYawDegrees(fallbackDegrees));
+            player.setXRot(ThreadLocalRandom.current().nextInt(75, 85));
         }
     }
 
@@ -409,16 +376,5 @@ public class InteractionMixin {
         double horizontal = Math.sqrt((dx * dx) + (dz * dz));
         double pitch = -Math.toDegrees(Math.atan2(dy, horizontal));
         player.setXRot((float) pitch);
-    }
-
-    private static float[] colorForAction(int action) {
-        return switch (action) {
-            case Action.WALK -> new float[]{0.15f, 0.85f, 0.15f};   // green
-            case Action.JUMP -> new float[]{1.0f, 0.9f, 0.1f};      // yellow
-            case Action.PILLAR -> new float[]{0.9f, 0.2f, 0.95f};   // purple
-            case Action.BRIDGE -> new float[]{0.2f, 0.55f, 1.0f};   // blue
-            case Action.DROP -> new float[]{1.0f, 0.55f, 0.15f};    // orange
-            default -> new float[]{1.0f, 1.0f, 1.0f};               // white
-        };
     }
 }

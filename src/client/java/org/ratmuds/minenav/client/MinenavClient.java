@@ -28,7 +28,7 @@ public class MinenavClient implements ClientModInitializer {
     public void setNavigating(boolean navigating) {
         this.isNavigating = navigating;
         if (!navigating) {
-            clearCubes();
+            //clearCubes();
             // Reset keys when stopping
             if (net.minecraft.client.Minecraft.getInstance().options != null) {
                 net.minecraft.client.Minecraft.getInstance().options.keyUp.setDown(false);
@@ -37,7 +37,7 @@ public class MinenavClient implements ClientModInitializer {
                 net.minecraft.client.Minecraft.getInstance().options.keyUse.setDown(false);
                 net.minecraft.client.Minecraft.getInstance().options.keyShift.setDown(false);
 
-                cubeRenderer.clearCubes();
+                //cubeRenderer.clearCubes();
             }
         }
     }
