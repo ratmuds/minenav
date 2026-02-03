@@ -3,12 +3,14 @@ package org.ratmuds.minenav.client.mixins;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Vec3i;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.world.WorldlyContainer;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.block.AirBlock;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.storage.WorldData;
 import org.ratmuds.minenav.client.AStar3D;
 import org.ratmuds.minenav.client.CubeData;
@@ -33,6 +35,11 @@ public class InteractionMixin {
     private static Vec3 pathOrigin;
     private static AtomicBoolean isCalculating = new AtomicBoolean(false);
 
+    private static Vec3 lastBridgePos = null;
+    private static int bridgeNoMoveTicks = 0;
+    private static boolean bridgeFallbackActive = false;
+    private static BlockPos lastSolidBlockBelow = null;
+
     @Inject(method = "tick", at = @At("HEAD"))
     private void onTick(CallbackInfo ci) {
         tickCounter++;
@@ -41,6 +48,14 @@ public class InteractionMixin {
         if (mc == null || mc.player == null || mc.level == null) return;
         Player player = mc.player;
         ClientLevel level = mc.level;
+
+        if (player.onGround()) {
+            BlockPos posBelow = player.getBlockPosBelowThatAffectsMyMovement();
+            BlockState stateBelow = level.getBlockState(posBelow);
+            if (!(stateBelow.getBlock() instanceof AirBlock)) {
+                lastSolidBlockBelow = posBelow;
+            }
+        }
 
         // Get the client instance
         MinenavClient client = MinenavClient.getInstance();
@@ -60,7 +75,7 @@ public class InteractionMixin {
         }
 
         // Check if player near end
-        if (start.distanceTo(end) < 3) {
+        if (start.distanceTo(end) < 1.75) {
             client.setNavigating(false);
             player.displayClientMessage(Component.literal("Completed pathfinding!"), true);
             return;
@@ -107,19 +122,21 @@ public class InteractionMixin {
                         Block block = level.getBlockState(new BlockPos(worldX, worldY, worldZ)).getBlock();
 
                         if (block instanceof AirBlock) {
-                            costs[x][y][z] = 10.0;  // Use small positive cost, not 0
+                            costs[x][y][z] = 1.0;  // Use small positive cost, not 0
 
-                            // Check if block is floating
-                            if (worldY > player.position().y && level.getBlockState(new BlockPos(worldX, worldY - 1, worldZ)).getBlock() instanceof AirBlock) {
-                                costs[x][y][z] = 30.0;
+                            // Check if block is floating (no solid block beneath)
+                            if (level.getBlockState(new BlockPos(worldX, worldY - 1, worldZ)).getBlock() instanceof AirBlock) {
+                                costs[x][y][z] += 10.0; // Heavily penalize walking on air
 
-                                // Check if block if extra floating
+                                // Check if block is high up in the air
                                 if (level.getBlockState(new BlockPos(worldX, worldY - 2, worldZ)).getBlock() instanceof AirBlock) {
-                                    costs[x][y][z] = 70.0;
+                                    costs[x][y][z] += 100.0;
                                 }
-                            } else if (worldY < player.position().y) {
-                                costs[x][y][z] = 20.0;
                             }
+
+                            /*if (worldY < player.position().y) {
+                                costs[x][y][z] += 10.0;
+                            }*/
                         } else {
                             costs[x][y][z] = Double.POSITIVE_INFINITY;  // Use infinity for unwalkable
                         }
@@ -169,6 +186,7 @@ public class InteractionMixin {
 
         if (path.size() < 2) {
             player.displayClientMessage(Component.literal("Reached end of current path..."), true);
+            return;
         }
         
         // Re-evaluate next node after potential removal
@@ -185,30 +203,153 @@ public class InteractionMixin {
         double dx = pos.getX() + 0.5 - player.position().x;
         double dz = pos.getZ() + 0.5 - player.position().z;
         double degrees = -Math.toDegrees(Math.atan2(dx, dz));
-        player.setYRot((float) degrees);
+        player.setYRot(wrapYawDegrees(degrees));
 
-        // Use controls
+        // Reset controls
+        if (level.getBlockState(pos.below()).getBlock() instanceof AirBlock) {
+            mc.options.keyUp.setDown(false);
+            player.displayClientMessage(Component.literal("Waiting... (" + path.size() + " waypoints left)"), true);
 
-        // Check if in front
-        if (degrees < 10 || degrees > 350) {
+            if (player.getRotationVector().y == 90) {
+                mc.options.keyUse.setDown(true);
+            }
+        } else {
             mc.options.keyUp.setDown(true);
+            player.displayClientMessage(Component.literal("Navigating... (" + path.size() + " waypoints left)"), true);
         }
+
+        mc.options.keyJump.setDown(false);
+        mc.options.keyShift.setDown(false);
+        mc.options.keyUse.setDown(false);
+        mc.options.keyDown.setDown(false);
 
         // Check if jump needed
         if (player.onGround() && player.position().y < pos.getY()) {
             mc.options.keyJump.setDown(true);
-            mc.options.keyUse.setDown(false);
-        } else if (!player.onGround() && Math.abs(player.position().y - pos.getY()) > 1) {
             player.setXRot(90);
             mc.options.keyUse.setDown(true);
+
+            player.displayClientMessage(Component.literal("Jumping... (" + path.size() + " waypoints left)"), true);
+        } else if (!player.onGround() && Math.abs(player.position().y - pos.getY()) > 1) {
+            if (lastSolidBlockBelow != null) {
+                aimAtBlockTop(player, lastSolidBlockBelow);
+            } else {
+                player.setXRot(90);
+            }
+            mc.options.keyUse.setDown(true);
+
+            player.displayClientMessage(Component.literal("Placing block underneath... (" + path.size() + " waypoints left)"), true);
         } else {
             mc.options.keyUse.setDown(false);
 
             if (player.getRotationVector().x == 90) {
                 player.setXRot(0);
             }
+
+	            // Check if we need to bridge (floating blocks on same Y level)
+	            if (player.onGround() && level.getBlockState(pos.below()).getBlock() instanceof AirBlock && level.getBlockState(pos.subtract(new Vec3i(0, 2, 0))).getBlock() instanceof AirBlock) {
+	                float bridgeYaw = wrapYawDegrees(degrees + 180.0);
+	                player.setYRot(bridgeYaw);
+
+                // Bridging requires a very unique control scheme :)
+                mc.options.keyShift.setDown(true);
+                mc.options.keyUp.setDown(false);
+                mc.options.keyDown.setDown(true);
+                mc.options.keyJump.setDown(false);
+                mc.options.keyUse.setDown(true);
+
+                // Get block player is standing on
+                BlockPos posBelow = player.getBlockPosBelowThatAffectsMyMovement();
+                BlockState stateBelow = level.getBlockState(posBelow);
+                Block blockBelow = stateBelow.getBlock();
+
+	                if (!(blockBelow instanceof AirBlock)) {
+	                    lastSolidBlockBelow = posBelow;
+	                }
+
+	                if (lastSolidBlockBelow != null) {
+	                    aimPitchAtBlockTop(player, lastSolidBlockBelow);
+	                } else {
+	                    player.setXRot(80);
+	                }
+
+	                String blockName = blockBelow.getDescriptionId();
+	                MutableComponent message = Component.literal("Bridging from ").append(Component.literal(blockName)).append(Component.literal("... (" + path.size() + " waypoints left)"));
+	                player.displayClientMessage(message, true);
+
+                // Look slightly below block
+                Vec3 currentPos = player.position();
+
+                // Bridge fallback check
+                if (lastBridgePos != null) {
+                    double movedX = currentPos.x - lastBridgePos.x;
+                    double movedZ = currentPos.z - lastBridgePos.z;
+                    double horizontalMoved = Math.sqrt((movedX * movedX) + (movedZ * movedZ));
+                    if (horizontalMoved < 0.005) {
+                        bridgeNoMoveTicks++;
+                    } else {
+                        bridgeNoMoveTicks = 0;
+                        bridgeFallbackActive = false;
+                    }
+                }
+                lastBridgePos = currentPos;
+
+                if (!bridgeFallbackActive && bridgeNoMoveTicks >= 20) {
+                    bridgeFallbackActive = true;
+                    player.displayClientMessage(Component.literal("Bridge fallback activated (stuck ~1s)"), true);
+                }
+
+                if (bridgeFallbackActive) {
+                    dx = (posBelow.getX() + 0.5) - player.position().x;
+                    dz = (posBelow.getZ() + 0.5) - player.position().z;
+                    double fallbackDegrees = -Math.toDegrees(Math.atan2(dx, dz));
+                    player.setYRot(wrapYawDegrees(fallbackDegrees));
+                    player.setXRot(75);
+                }
+            } else {
+                lastBridgePos = null;
+                bridgeNoMoveTicks = 0;
+                bridgeFallbackActive = false;
+            }
         }
-        
-        mc.options.keyUp.setDown(true);
     }
+
+	    private static float wrapYawDegrees(double degrees) {
+	        double wrapped = degrees % 360.0;
+	        if (wrapped < 0) wrapped += 360.0;
+	        return (float) wrapped;
+	    }
+
+	    private static void aimAtBlockTop(Player player, BlockPos target) {
+	        Vec3 eyePos = player.getEyePosition();
+	        double targetX = target.getX() + 0.5;
+	        double targetY = target.getY() + 0.95;
+	        double targetZ = target.getZ() + 0.5;
+
+	        double dx = targetX - eyePos.x;
+	        double dy = targetY - eyePos.y;
+	        double dz = targetZ - eyePos.z;
+
+	        double horizontal = Math.sqrt((dx * dx) + (dz * dz));
+	        double yaw = -Math.toDegrees(Math.atan2(dx, dz));
+	        double pitch = -Math.toDegrees(Math.atan2(dy, horizontal));
+
+	        player.setYRot(wrapYawDegrees(yaw));
+	        player.setXRot((float) pitch);
+	    }
+
+	    private static void aimPitchAtBlockTop(Player player, BlockPos target) {
+	        Vec3 eyePos = player.getEyePosition();
+	        double targetX = target.getX() + 0.5;
+	        double targetY = target.getY() + 0.95;
+	        double targetZ = target.getZ() + 0.5;
+
+	        double dx = targetX - eyePos.x;
+	        double dy = targetY - eyePos.y;
+	        double dz = targetZ - eyePos.z;
+
+	        double horizontal = Math.sqrt((dx * dx) + (dz * dz));
+	        double pitch = -Math.toDegrees(Math.atan2(dy, horizontal));
+	        player.setXRot((float) pitch);
+	    }
 }

@@ -32,8 +32,10 @@ public class MinenavClient implements ClientModInitializer {
             // Reset keys when stopping
             if (net.minecraft.client.Minecraft.getInstance().options != null) {
                 net.minecraft.client.Minecraft.getInstance().options.keyUp.setDown(false);
+                net.minecraft.client.Minecraft.getInstance().options.keyDown.setDown(false);
                 net.minecraft.client.Minecraft.getInstance().options.keyJump.setDown(false);
                 net.minecraft.client.Minecraft.getInstance().options.keyUse.setDown(false);
+                net.minecraft.client.Minecraft.getInstance().options.keyShift.setDown(false);
 
                 cubeRenderer.clearCubes();
             }
