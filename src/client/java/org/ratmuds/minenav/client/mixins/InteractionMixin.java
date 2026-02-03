@@ -6,28 +6,28 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Vec3i;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
-import net.minecraft.world.WorldlyContainer;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.block.AirBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.storage.WorldData;
+import net.minecraft.world.phys.Vec3;
 import org.ratmuds.minenav.client.AStar3D;
 import org.ratmuds.minenav.client.CubeData;
 import org.ratmuds.minenav.client.MinenavClient;
+import org.ratmuds.minenav.client.PathGridSnapshot;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
-import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.ThreadLocalRandom;
-
-import static org.ratmuds.minenav.client.AStar3D.findPath;
 
 @Mixin(Player.class)
 public class InteractionMixin {
@@ -41,6 +41,23 @@ public class InteractionMixin {
     private static boolean bridgeFallbackActive = false;
     private static BlockPos lastSolidBlockBelow = null;
 
+    private static final int RECALC_INTERVAL_TICKS = 20;
+    private static final int CALC_TIMEOUT_TICKS = 120;
+    private static final int GRID_TTL_TICKS = 40;
+    private static final int MAX_GRID_CELLS = 350_000;
+    private static final int MAX_EXPANDED_NODES = 250_000;
+
+    private static long nextRecalcGameTime = 0;
+    private static int failedRecalcCount = 0;
+
+    private static BlockPos lastRequestedStart = null;
+    private static BlockPos lastRequestedEnd = null;
+
+    private static PathGridSnapshot cachedGrid = null;
+    private static CompletableFuture<List<int[]>> inFlight = null;
+    private static long calcStartedGameTime = 0;
+    private static final AtomicInteger calcRequestId = new AtomicInteger(0);
+
     @Inject(method = "tick", at = @At("HEAD"))
     private void onTick(CallbackInfo ci) {
         tickCounter++;
@@ -50,19 +67,12 @@ public class InteractionMixin {
         Player player = mc.player;
         ClientLevel level = mc.level;
 
-        if (player.onGround()) {
-            BlockPos posBelow = player.getBlockPosBelowThatAffectsMyMovement();
-            BlockState stateBelow = level.getBlockState(posBelow);
-            if (!(stateBelow.getBlock() instanceof AirBlock)) {
-                lastSolidBlockBelow = posBelow;
-            }
-        }
+        updateLastSolidBlockBelow(player, level);
 
         // Get the client instance
         MinenavClient client = MinenavClient.getInstance();
         if (!client.isNavigating()) {
-            path = null;
-            pathOrigin = null;
+            resetNavigationState();
             return;
         }
 
@@ -82,105 +92,202 @@ public class InteractionMixin {
             return;
         }
 
-        // Automatic Boundaries
-        double padding = 20.0;
-        Vec3 pathFindBoundStart = new Vec3(
-                Math.min(start.x, end.x) - padding,
-                Math.min(start.y, end.y) - padding,
-                Math.min(start.z, end.z) - padding
-        );
-        Vec3 pathFindBoundEnd = new Vec3(
-                Math.max(start.x, end.x) + padding,
-                Math.max(start.y, end.y) + padding, // Extended Y range
-                Math.max(start.z, end.z) + padding
-        );
+        long gameTime = level.getGameTime();
+        maybeTimeoutPathfinding(player, gameTime);
+        maybeShowRecalculating(player);
+        maybeStartPathfinding(mc, player, level, client, start, end, gameTime);
+        followPath(mc, player, level);
+    }
 
-        if (tickCounter % 5 == 0 && !isCalculating.get()) {
+    private static void updateLastSolidBlockBelow(Player player, ClientLevel level) {
+        if (!player.onGround()) return;
+        BlockPos posBelow = player.getBlockPosBelowThatAffectsMyMovement();
+        if (!(level.getBlockState(posBelow).getBlock() instanceof AirBlock)) {
+            lastSolidBlockBelow = posBelow;
+        }
+    }
 
-            // Calculate array dimensions (must be at least 1 in each dimension)
-            int sizeX = (int) Math.abs(pathFindBoundEnd.x - pathFindBoundStart.x);
-            int sizeY = (int) Math.abs(pathFindBoundEnd.y - pathFindBoundStart.y);
-            int sizeZ = (int) Math.abs(pathFindBoundEnd.z - pathFindBoundStart.z);
+    private static void resetNavigationState() {
+        path = null;
+        pathOrigin = null;
+        lastRequestedStart = null;
+        lastRequestedEnd = null;
+        failedRecalcCount = 0;
+        nextRecalcGameTime = 0;
+        cachedGrid = null;
+        if (inFlight != null) {
+            inFlight.cancel(true);
+            inFlight = null;
+        }
+        isCalculating.set(false);
+    }
 
-            // Ensure a minimum size of 1 for each dimension
-            sizeX = Math.max(sizeX, 1);
-            sizeY = Math.max(sizeY, 1);
-            sizeZ = Math.max(sizeZ, 1);
+    private static void maybeTimeoutPathfinding(Player player, long gameTime) {
+        if (!isCalculating.get() || inFlight == null) return;
+        if ((gameTime - calcStartedGameTime) <= CALC_TIMEOUT_TICKS) return;
 
-            // Setup costs
-            double[][][] costs = new double[sizeX][sizeY][sizeZ];
+        inFlight.cancel(true);
+        inFlight = null;
+        isCalculating.set(false);
+        failedRecalcCount++;
+        nextRecalcGameTime = gameTime + backoffTicks(failedRecalcCount);
+        player.displayClientMessage(Component.literal("Pathfinding timed out; retrying soon..."), true);
+    }
 
-            // Generate costs on main thread (safe block access)
-            for (int x = 0; x < sizeX; x++) {
-                for (int y = 0; y < sizeY; y++) {
-                    for (int z = 0; z < sizeZ; z++) {
-                        // Convert array indices to world coordinates
-                        int worldX = (int) pathFindBoundStart.x + x;
-                        int worldY = (int) pathFindBoundStart.y + y;
-                        int worldZ = (int) pathFindBoundStart.z + z;
+    private static void maybeShowRecalculating(Player player) {
+        if (!isCalculating.get()) return;
+        if (tickCounter % 10 != 0) return;
+        player.displayClientMessage(Component.literal("Recalculating path..."), true);
+    }
 
-                        // Fetch block in that position
-                        Block block = level.getBlockState(new BlockPos(worldX, worldY, worldZ)).getBlock();
+    private static void maybeStartPathfinding(Minecraft mc, Player player, ClientLevel level, MinenavClient client, Vec3 start, Vec3 end, long gameTime) {
+        BlockPos startBlock = player.blockPosition();
+        BlockPos endBlock = BlockPos.containing(end);
 
-                        if (block instanceof AirBlock) {
-                            costs[x][y][z] = 1.0;  // Use small positive cost, not 0
+        boolean startOrEndChanged = lastRequestedStart == null
+                || lastRequestedEnd == null
+                || !lastRequestedStart.equals(startBlock)
+                || !lastRequestedEnd.equals(endBlock);
 
-                            // Check if block is floating (no solid block beneath)
-                            if (level.getBlockState(new BlockPos(worldX, worldY - 1, worldZ)).getBlock() instanceof AirBlock) {
-                                costs[x][y][z] += 10.0; // Heavily penalize walking on air
+        boolean needsPath = path == null || pathOrigin == null || path.size() < 2;
+        boolean canRecalcNow = !isCalculating.get()
+                && inFlight == null
+                && gameTime >= nextRecalcGameTime
+                && (tickCounter % RECALC_INTERVAL_TICKS == 0);
 
-                                // Check if block is high up in the air
-                                if (level.getBlockState(new BlockPos(worldX, worldY - 2, worldZ)).getBlock() instanceof AirBlock) {
-                                    costs[x][y][z] += 100.0;
-                                }
-                            }
+        if (!canRecalcNow || (!needsPath && !startOrEndChanged)) return;
 
-                            /*if (worldY < player.position().y) {
-                                costs[x][y][z] += 10.0;
-                            }*/
-                        } else {
-                            costs[x][y][z] = Double.POSITIVE_INFINITY;  // Use infinity for unwalkable
-                        }
-                    }
-                }
-            }
+        double horizontalPadding = 24.0;
+        double verticalPadding = 12.0;
 
-            // Convert world coordinates to array indices for pathfinding
-            int startX = (int) (start.x - pathFindBoundStart.x);
-            int startY = (int) (start.y - pathFindBoundStart.y);
-            int startZ = (int) (start.z - pathFindBoundStart.z);
-            int endX = (int) (end.x - pathFindBoundStart.x);
-            int endY = (int) (end.y - pathFindBoundStart.y);
-            int endZ = (int) (end.z - pathFindBoundStart.z);
+        int minX = (int) Math.floor(Math.min(start.x, end.x) - horizontalPadding);
+        int maxX = (int) Math.ceil(Math.max(start.x, end.x) + horizontalPadding);
+        int minY = (int) Math.floor(Math.min(start.y, end.y) - verticalPadding) - 2; // extra for "below" checks
+        int maxY = (int) Math.ceil(Math.max(start.y, end.y) + verticalPadding) + 2;  // extra for headroom
+        int minZ = (int) Math.floor(Math.min(start.z, end.z) - horizontalPadding);
+        int maxZ = (int) Math.ceil(Math.max(start.z, end.z) + horizontalPadding);
 
-            // Start async calculation
-            isCalculating.set(true);
-            CompletableFuture.supplyAsync(() -> {
-                return findPath(costs, startX, startY, startZ, endX, endY, endZ);
-            }).thenAcceptAsync(newPath -> {
-                path = newPath;
-                pathOrigin = pathFindBoundStart;
-                isCalculating.set(false);
+        int sizeX = Math.max(maxX - minX + 1, 1);
+        int sizeY = Math.max(maxY - minY + 1, 1);
+        int sizeZ = Math.max(maxZ - minZ + 1, 1);
 
-                if (path != null) {
-                    List<CubeData> cubes = new ArrayList<>();
-                    for (int[] coords : path) {
-                        // Convert array indices back to world coordinates
-                        float worldX = (float) (pathOrigin.x + coords[0]);
-                        float worldY = (float) (pathOrigin.y + coords[1]);
-                        float worldZ = (float) (pathOrigin.z + coords[2]);
-                        cubes.add(CubeData.create(worldX, worldY, worldZ, 1f, 0f, 0f, 1f, 0.75f));
-                    }
-                    client.clearCubes();
-                    client.renderCubes(cubes);
-                }
-            }, mc);
+        long cells = (long) sizeX * (long) sizeY * (long) sizeZ;
+        if (cells > MAX_GRID_CELLS) {
+            failedRecalcCount++;
+            nextRecalcGameTime = gameTime + backoffTicks(failedRecalcCount);
+            player.displayClientMessage(Component.literal("Search area too large (" + cells + " cells); move closer to target."), true);
+            return;
         }
 
+        lastRequestedStart = startBlock;
+        lastRequestedEnd = endBlock;
+
+        PathGridSnapshot grid = cachedGrid;
+        boolean reuseGrid = grid != null
+                && grid.matches(minX, minY, minZ, sizeX, sizeY, sizeZ)
+                && (gameTime - grid.builtGameTime) <= GRID_TTL_TICKS;
+
+        if (!reuseGrid) {
+            grid = buildGridSnapshot(level, minX, minY, minZ, sizeX, sizeY, sizeZ, (int) cells, gameTime);
+            cachedGrid = grid;
+        }
+
+        Vec3 gridOrigin = new Vec3(grid.minX, grid.minY, grid.minZ);
+        final PathGridSnapshot gridForCalc = grid;
+        final Vec3 gridOriginForCalc = gridOrigin;
+        final long gameTimeForCalc = gameTime;
+
+        int startX = clamp(startBlock.getX() - grid.minX, 0, grid.sizeX - 1);
+        int startY = clamp(startBlock.getY() - grid.minY, 0, grid.sizeY - 1);
+        int startZ = clamp(startBlock.getZ() - grid.minZ, 0, grid.sizeZ - 1);
+        int endX = clamp(endBlock.getX() - grid.minX, 0, grid.sizeX - 1);
+        int endY = clamp(endBlock.getY() - grid.minY, 0, grid.sizeY - 1);
+        int endZ = clamp(endBlock.getZ() - grid.minZ, 0, grid.sizeZ - 1);
+
+        int requestId = calcRequestId.incrementAndGet();
+        isCalculating.set(true);
+        calcStartedGameTime = gameTimeForCalc;
+
+        inFlight = CompletableFuture.supplyAsync(() -> {
+            double[] costs = gridForCalc.costs;
+            if (costs == null) {
+                costs = buildCosts(gridForCalc.isAir, gridForCalc.sizeX, gridForCalc.sizeY, gridForCalc.sizeZ);
+                gridForCalc.costs = costs;
+            }
+            return AStar3D.findPath(
+                    costs,
+                    gridForCalc.sizeX, gridForCalc.sizeY, gridForCalc.sizeZ,
+                    startX, startY, startZ,
+                    endX, endY, endZ,
+                    MAX_EXPANDED_NODES
+            );
+        }).whenCompleteAsync((newPath, ex) -> {
+            if (requestId != calcRequestId.get()) return;
+
+            inFlight = null;
+            isCalculating.set(false);
+
+            if (ex != null) {
+                if (!(ex instanceof CancellationException) && !(ex instanceof CompletionException && ex.getCause() instanceof CancellationException)) {
+                    failedRecalcCount++;
+                    nextRecalcGameTime = gameTimeForCalc + backoffTicks(failedRecalcCount);
+                    player.displayClientMessage(Component.literal("Pathfinding failed; retrying soon..."), true);
+                }
+                return;
+            }
+
+            path = newPath;
+            pathOrigin = gridOriginForCalc;
+
+            if (path == null) {
+                failedRecalcCount++;
+                nextRecalcGameTime = gameTimeForCalc + backoffTicks(failedRecalcCount);
+                client.clearCubes();
+                player.displayClientMessage(Component.literal("No path found; retrying soon..."), true);
+                return;
+            }
+
+            failedRecalcCount = 0;
+            nextRecalcGameTime = 0;
+            renderPathCubes(client, path, pathOrigin);
+        }, mc);
+    }
+
+    private static PathGridSnapshot buildGridSnapshot(ClientLevel level, int minX, int minY, int minZ, int sizeX, int sizeY, int sizeZ, int cells, long gameTime) {
+        BlockPos.MutableBlockPos mutable = new BlockPos.MutableBlockPos();
+        byte[] isAir = new byte[cells];
+        int idx = 0;
+        for (int x = 0; x < sizeX; x++) {
+            int worldX = minX + x;
+            for (int y = 0; y < sizeY; y++) {
+                int worldY = minY + y;
+                for (int z = 0; z < sizeZ; z++) {
+                    int worldZ = minZ + z;
+                    mutable.set(worldX, worldY, worldZ);
+                    BlockState state = level.getBlockState(mutable);
+                    isAir[idx++] = (byte) (state.getBlock() instanceof AirBlock ? 1 : 0);
+                }
+            }
+        }
+        return new PathGridSnapshot(minX, minY, minZ, sizeX, sizeY, sizeZ, gameTime, isAir);
+    }
+
+    private static void renderPathCubes(MinenavClient client, List<int[]> path, Vec3 pathOrigin) {
+        List<CubeData> cubes = new ArrayList<>();
+        for (int[] coords : path) {
+            float worldX = (float) (pathOrigin.x + coords[0]);
+            float worldY = (float) (pathOrigin.y + coords[1]);
+            float worldZ = (float) (pathOrigin.z + coords[2]);
+            cubes.add(CubeData.create(worldX, worldY, worldZ, 1f, 0f, 0f, 1f, 0.75f));
+        }
+        client.clearCubes();
+        client.renderCubes(cubes);
+    }
+
+    private static void followPath(Minecraft mc, Player player, ClientLevel level) {
         if (path == null || pathOrigin == null || path.size() < 2) return;
 
-        // Check if we should advance to the next path
-        Vec3 nextNodePos = new Vec3(pathOrigin.x + path.get(1)[0], pathOrigin.y + path.get(1)[1], pathOrigin.z + path.get(1)[2]);
+        Vec3 nextNodePos = getNextNodePos();
         if (nextNodePos.distanceTo(player.position()) < 1.5) {
             path.removeFirst();
         }
@@ -190,89 +297,140 @@ public class InteractionMixin {
             return;
         }
 
-        // Re-evaluate next node after potential removal
-        nextNodePos = new Vec3(pathOrigin.x + path.get(1)[0], pathOrigin.y + path.get(1)[1], pathOrigin.z + path.get(1)[2]);
+        BlockPos target = BlockPos.containing(getNextNodePos());
+        int waypointsLeft = path.size();
 
-        // Navigate autonomously using the path
-        BlockPos pos = new BlockPos(
-                (int)nextNodePos.x,
-                (int)nextNodePos.y,
-                (int)nextNodePos.z
-        );
-
-        // Rotate player
-        double dx = pos.getX() + 0.5 - player.position().x;
-        double dz = pos.getZ() + 0.5 - player.position().z;
-        double degrees = -Math.toDegrees(Math.atan2(dx, dz));
-        player.setYRot(wrapYawDegrees(degrees));
-
-        // Reset controls
-        if (level.getBlockState(pos.below()).getBlock() instanceof AirBlock) {
-            mc.options.keyUp.setDown(false);
-            bridge(mc, player, level, pos, pathFindBoundStart.x, pathFindBoundStart.y, pathFindBoundStart.z);
-
+        if (shouldBridgeTo(level, target)) {
+            boolean shouldPillarUp = shouldPillarUpWhileBridging(player);
+            doBridging(mc, player, level, target, waypointsLeft, shouldPillarUp);
             return;
-        } else {
-            mc.options.keyUp.setDown(true);
-            player.displayClientMessage(Component.literal("Navigating... (" + path.size() + " waypoints left)"), true);
         }
 
+        doWalkingAndPillaring(mc, player, level, target, waypointsLeft);
+    }
+
+    private static Vec3 getNextNodePos() {
+        return new Vec3(
+                pathOrigin.x + path.get(1)[0],
+                pathOrigin.y + path.get(1)[1],
+                pathOrigin.z + path.get(1)[2]
+        );
+    }
+
+    private static boolean shouldBridgeTo(ClientLevel level, BlockPos target) {
+        return level.getBlockState(target.below()).getBlock() instanceof AirBlock;
+    }
+
+    private static boolean shouldPillarUpWhileBridging(Player player) {
+        if (path == null || pathOrigin == null) return false;
+        if (path.size() <= 3) return false;
+        double nextNextY = pathOrigin.y + path.get(2)[1];
+        return nextNextY > player.getY();
+    }
+
+    private static void resetMovementKeys(Minecraft mc) {
         mc.options.keyJump.setDown(false);
         mc.options.keyShift.setDown(false);
         mc.options.keyUse.setDown(false);
         mc.options.keyDown.setDown(false);
+    }
 
-        // Check if jump needed
-        if (player.onGround() && player.position().y < pos.getY()) {
-            mc.options.keyJump.setDown(true);
-            player.setXRot(90);
-            mc.options.keyUse.setDown(true);
+    private static void turnPlayerToward(Player player, BlockPos target) {
+        double dx = target.getX() + 0.5 - player.position().x;
+        double dz = target.getZ() + 0.5 - player.position().z;
+        double degrees = -Math.toDegrees(Math.atan2(dx, dz));
+        player.setYRot(wrapYawDegrees(degrees));
+    }
 
-            player.displayClientMessage(Component.literal("Jumping... (" + path.size() + " waypoints left)"), true);
-        } else if (!player.onGround() && Math.abs(player.position().y - pos.getY()) > 1) {
-            if (lastSolidBlockBelow != null) {
-                aimAtBlockTop(player, lastSolidBlockBelow);
-            } else {
-                player.setXRot(90);
-            }
-            mc.options.keyUse.setDown(true);
+    private static void doWalkingAndPillaring(Minecraft mc, Player player, ClientLevel level, BlockPos target, int waypointsLeft) {
+        turnPlayerToward(player, target);
 
-            player.displayClientMessage(Component.literal("Placing block underneath... (" + path.size() + " waypoints left)"), true);
+        mc.options.keyUp.setDown(true);
+        resetMovementKeys(mc);
+
+        if (shouldJumpUp(player, target)) {
+            resetBridgeState();
+            doPillarUp(mc, player, "Jumping... (" + waypointsLeft + " waypoints left)");
+            return;
+        }
+
+        if (shouldPlaceUnderneath(player, target)) {
+            resetBridgeState();
+            doPlaceUnderneath(mc, player, "Placing block underneath... (" + waypointsLeft + " waypoints left)");
+            return;
+        }
+
+        player.displayClientMessage(Component.literal("Navigating... (" + waypointsLeft + " waypoints left)"), true);
+
+        if (player.getRotationVector().x == 90) {
+            player.setXRot(0);
+        }
+
+        boolean shouldBridgeSameLevel = player.onGround()
+                && (level.getBlockState(target.below()).getBlock() instanceof AirBlock)
+                && (level.getBlockState(target.subtract(new Vec3i(0, 2, 0))).getBlock() instanceof AirBlock);
+        if (shouldBridgeSameLevel) {
+            boolean shouldPillarUp = shouldPillarUpWhileBridging(player);
+            doBridging(mc, player, level, target, waypointsLeft, shouldPillarUp);
         } else {
-            mc.options.keyUse.setDown(false);
-
-            if (player.getRotationVector().x == 90) {
-                player.setXRot(0);
-            }
-
-            // Check if we need to bridge (floating blocks on same Y level)
-            if (player.onGround() && level.getBlockState(pos.below()).getBlock() instanceof AirBlock && level.getBlockState(pos.subtract(new Vec3i(0, 2, 0))).getBlock() instanceof AirBlock) {
-                bridge(mc, player, level, pos, pathFindBoundStart.x, pathFindBoundStart.y, pathFindBoundStart.z);
-            } else {
-                lastBridgePos = null;
-                bridgeNoMoveTicks = 0;
-                bridgeFallbackActive = false;
-            }
+            resetBridgeState();
         }
     }
 
-    private static void bridge(Minecraft mc, Player player, ClientLevel level, BlockPos pos, double startX, double startY, double startZ) {
-        double dx = pos.getX() + 0.5 - player.position().x;
-        double dz = pos.getZ() + 0.5 - player.position().z;
-        double degrees = -Math.toDegrees(Math.atan2(dx, dz));
-        player.setYRot(wrapYawDegrees(degrees));
+    private static boolean shouldJumpUp(Player player, BlockPos target) {
+        return player.onGround() && player.position().y < target.getY();
+    }
 
-        float bridgeYaw = wrapYawDegrees(degrees + 180.0);
+    private static boolean shouldPlaceUnderneath(Player player, BlockPos target) {
+        return !player.onGround() && Math.abs(player.position().y - target.getY()) > 0;
+    }
+
+    private static void doPillarUp(Minecraft mc, Player player, String statusMessage) {
+        player.displayClientMessage(Component.literal(statusMessage), true);
+        setPillarUpControls(mc, player);
+    }
+
+    private static void setPillarUpControls(Minecraft mc, Player player) {
+        player.setXRot(90);
+        mc.options.keyJump.setDown(true);
+        mc.options.keyUse.setDown(true);
+        mc.options.keyShift.setDown(false);
+        mc.options.keyDown.setDown(false);
+        mc.options.keyUp.setDown(false);
+    }
+
+    private static void doPlaceUnderneath(Minecraft mc, Player player, String statusMessage) {
+        player.displayClientMessage(Component.literal(statusMessage), true);
+        if (lastSolidBlockBelow != null) {
+            aimAtBlockTop(player, lastSolidBlockBelow);
+        } else {
+            player.setXRot(90);
+        }
+        mc.options.keyUse.setDown(true);
+        mc.options.keyShift.setDown(false);
+        mc.options.keyDown.setDown(false);
+        mc.options.keyUp.setDown(false);
+        mc.options.keyJump.setDown(true);
+    }
+
+    private static void resetBridgeState() {
+        lastBridgePos = null;
+        bridgeNoMoveTicks = 0;
+        bridgeFallbackActive = false;
+    }
+
+    private static void doBridging(Minecraft mc, Player player, ClientLevel level, BlockPos target, int waypointsLeft, boolean shouldPillarUp) {
+        turnPlayerToward(player, target);
+        float bridgeYaw = wrapYawDegrees(player.getYRot() + 180.0);
         player.setYRot(bridgeYaw);
 
-        // Bridging requires a very unique control scheme :)
+        // Bridging controls
         mc.options.keyShift.setDown(true);
         mc.options.keyUp.setDown(false);
         mc.options.keyDown.setDown(true);
         mc.options.keyJump.setDown(false);
         mc.options.keyUse.setDown(true);
 
-        // Get block player is standing on
         BlockPos posBelow = player.getBlockPosBelowThatAffectsMyMovement();
         BlockState stateBelow = level.getBlockState(posBelow);
         Block blockBelow = stateBelow.getBlock();
@@ -287,31 +445,27 @@ public class InteractionMixin {
             player.setXRot(80);
         }
 
-        if (path.size() > 3 && path.get(2)[1] + startY > player.getY()) {
-            String blockName = blockBelow.getDescriptionId();
-            MutableComponent message = Component.literal("Building up from ").append(Component.literal(blockName)).append(Component.literal("... (" + path.size() + " waypoints left)"));
+        String blockName = blockBelow.getDescriptionId();
+        if (shouldPillarUp) {
+            MutableComponent message = Component.literal("Building up from ")
+                    .append(Component.literal(blockName))
+                    .append(Component.literal("... (" + waypointsLeft + " waypoints left)"));
             player.displayClientMessage(message, true);
-
-            player.setXRot(90);
-
-            mc.options.keyJump.setDown(true);
-            mc.options.keyShift.setDown(false);
-            mc.options.keyUse.setDown(true);
-            mc.options.keyDown.setDown(false);
-            mc.options.keyUp.setDown(false);
-
+            setPillarUpControls(mc, player);
             return;
-
-        } else {
-            String blockName = blockBelow.getDescriptionId();
-            MutableComponent message = Component.literal("Bridging from ").append(Component.literal(blockName)).append(Component.literal("... (" + path.size() + " waypoints left)"));
-            player.displayClientMessage(message, true);
         }
 
-        // Look slightly below block
+        MutableComponent message = Component.literal("Bridging from ")
+                .append(Component.literal(blockName))
+                .append(Component.literal("... (" + waypointsLeft + " waypoints left)"));
+        player.displayClientMessage(message, true);
+
+        updateBridgeFallback(player, posBelow);
+    }
+
+    private static void updateBridgeFallback(Player player, BlockPos posBelow) {
         Vec3 currentPos = player.position();
 
-        // Bridge fallback check
         if (lastBridgePos != null) {
             double movedX = currentPos.x - lastBridgePos.x;
             double movedZ = currentPos.z - lastBridgePos.z;
@@ -330,13 +484,52 @@ public class InteractionMixin {
             player.displayClientMessage(Component.literal("Bridge fallback activated (stuck ~1s)"), true);
         }
 
-        if (bridgeFallbackActive) {
-            dx = (posBelow.getX() + 0.5) - player.position().x;
-            dz = (posBelow.getZ() + 0.5) - player.position().z;
-            double fallbackDegrees = -Math.toDegrees(Math.atan2(dx, dz));
-            player.setYRot(wrapYawDegrees(fallbackDegrees));
-            player.setXRot(ThreadLocalRandom.current().nextInt(75, 85));
+        if (!bridgeFallbackActive) return;
+
+        double dx = (posBelow.getX() + 0.5) - player.position().x;
+        double dz = (posBelow.getZ() + 0.5) - player.position().z;
+        double fallbackDegrees = -Math.toDegrees(Math.atan2(dx, dz));
+        player.setYRot(wrapYawDegrees(fallbackDegrees));
+        player.setXRot(ThreadLocalRandom.current().nextInt(75, 85));
+    }
+
+    private static int clamp(int v, int min, int max) {
+        if (v < min) return min;
+        if (v > max) return max;
+        return v;
+    }
+
+    private static int backoffTicks(int failures) {
+        int capped = Math.min(failures, 6);
+        return 20 * (1 << capped);
+    }
+
+    private static int index(int sizeY, int sizeZ, int x, int y, int z) {
+        return (x * sizeY + y) * sizeZ + z;
+    }
+
+    private static double[] buildCosts(byte[] isAir, int sizeX, int sizeY, int sizeZ) {
+        double[] costs = new double[sizeX * sizeY * sizeZ];
+        for (int x = 0; x < sizeX; x++) {
+            for (int y = 0; y < sizeY; y++) {
+                for (int z = 0; z < sizeZ; z++) {
+                    int i = index(sizeY, sizeZ, x, y, z);
+                    if (isAir[i] == 1) {
+                        double cost = 1.0;
+                        if (y - 1 >= 0 && isAir[index(sizeY, sizeZ, x, y - 1, z)] == 1) {
+                            cost += 10.0;
+                            if (y - 2 >= 0 && isAir[index(sizeY, sizeZ, x, y - 2, z)] == 1) {
+                                cost += 100.0;
+                            }
+                        }
+                        costs[i] = cost;
+                    } else {
+                        costs[i] = Double.POSITIVE_INFINITY;
+                    }
+                }
+            }
         }
+        return costs;
     }
 
     private static float wrapYawDegrees(double degrees) {

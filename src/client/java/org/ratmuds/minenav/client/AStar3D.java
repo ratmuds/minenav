@@ -58,6 +58,14 @@ public class AStar3D {
         int maxY = costs[0].length;
         int maxZ = costs[0][0].length;
 
+        return findPath(toFlat(costs), maxX, maxY, maxZ, startX, startY, startZ, endX, endY, endZ, Integer.MAX_VALUE);
+    }
+
+    public static List<int[]> findPath(double[] costs,
+                                       int maxX, int maxY, int maxZ,
+                                       int startX, int startY, int startZ,
+                                       int endX, int endY, int endZ,
+                                       int maxExpandedNodes) {
         PriorityQueue<Node> openSet = new PriorityQueue<>();
         Set<Node> closedSet = new HashSet<>();
         Map<Node, Node> nodeMap = new HashMap<>();
@@ -69,7 +77,11 @@ public class AStar3D {
         openSet.add(startNode);
         nodeMap.put(startNode, startNode);
 
+        int expandedNodes = 0;
         while (!openSet.isEmpty()) {
+            if (expandedNodes++ > maxExpandedNodes) {
+                return null;
+            }
             Node current = openSet.poll();
 
             // Goal reached
@@ -91,7 +103,7 @@ public class AStar3D {
                 }
 
                 // Check if this position is walkable (entity is 2 blocks tall)
-                if (!isWalkable(costs, nx, ny, nz)) {
+                if (!isWalkable(costs, maxY, maxZ, nx, ny, nz)) {
                     continue;
                 }
 
@@ -100,7 +112,7 @@ public class AStar3D {
                     continue;
                 }
 
-                double tentativeG = current.g + costs[nx][ny][nz];
+                double tentativeG = current.g + costs[index(maxY, maxZ, nx, ny, nz)];
 
                 Node existingNode = nodeMap.get(neighbor);
                 if (existingNode == null) {
@@ -125,16 +137,14 @@ public class AStar3D {
      * Check if a position is walkable for a 2-block tall entity
      * Position (x,y,z) is the feet position, so we need y and y+1 to be passable
      */
-    private static boolean isWalkable(double[][][] costs, int x, int y, int z) {
-        int maxY = costs[0].length;
-
+    private static boolean isWalkable(double[] costs, int maxY, int maxZ, int x, int y, int z) {
         // Check feet block
-        if (costs[x][y][z] == Double.POSITIVE_INFINITY) {
+        if (costs[index(maxY, maxZ, x, y, z)] == Double.POSITIVE_INFINITY) {
             return false;
         }
 
         // Check head block (y+1)
-        if (y + 1 >= maxY || costs[x][y + 1][z] == Double.POSITIVE_INFINITY) {
+        if (y + 1 >= maxY || costs[index(maxY, maxZ, x, y + 1, z)] == Double.POSITIVE_INFINITY) {
             return false;
         }
 
@@ -162,5 +172,25 @@ public class AStar3D {
 
         Collections.reverse(path);
         return path;
+    }
+
+    private static int index(int maxY, int maxZ, int x, int y, int z) {
+        return (x * maxY + y) * maxZ + z;
+    }
+
+    private static double[] toFlat(double[][][] costs) {
+        int maxX = costs.length;
+        int maxY = costs[0].length;
+        int maxZ = costs[0][0].length;
+
+        double[] flat = new double[maxX * maxY * maxZ];
+        for (int x = 0; x < maxX; x++) {
+            for (int y = 0; y < maxY; y++) {
+                for (int z = 0; z < maxZ; z++) {
+                    flat[index(maxY, maxZ, x, y, z)] = costs[x][y][z];
+                }
+            }
+        }
+        return flat;
     }
 }
