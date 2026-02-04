@@ -10,6 +10,7 @@ import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.block.AirBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.Vec2;
 import net.minecraft.world.phys.Vec3;
 import org.ratmuds.minenav.client.AStar3D;
 import org.ratmuds.minenav.client.CubeData;
@@ -86,7 +87,7 @@ public class InteractionMixin {
         }
 
         // Check if player near end
-        if (start.distanceTo(end) < 1.75) {
+        if (start.distanceTo(end) < 0.25) {
             client.setNavigating(false);
             player.displayClientMessage(Component.literal("Completed pathfinding!"), true);
             return;
@@ -96,7 +97,7 @@ public class InteractionMixin {
         maybeTimeoutPathfinding(player, gameTime);
         maybeShowRecalculating(player);
         maybeStartPathfinding(mc, player, level, client, start, end, gameTime);
-        followPath(mc, player, level);
+        followPath(mc, player, level, client);
     }
 
     private static void updateLastSolidBlockBelow(Player player, ClientLevel level) {
@@ -234,14 +235,14 @@ public class InteractionMixin {
                     player.displayClientMessage(Component.literal("Pathfinding failed; retrying soon..."), true);
                 }
                 return;
-            }
-
-            path = newPath;
-            pathOrigin = gridOriginForCalc;
-
-            if (path == null) {
-                failedRecalcCount++;
-                nextRecalcGameTime = gameTimeForCalc + backoffTicks(failedRecalcCount);
+	            }
+	
+	            path = cutLShapeCorners(newPath);
+	            pathOrigin = gridOriginForCalc;
+	
+	            if (path == null) {
+	                failedRecalcCount++;
+	                nextRecalcGameTime = gameTimeForCalc + backoffTicks(failedRecalcCount);
                 client.clearCubes();
                 player.displayClientMessage(Component.literal("No path found; retrying soon..."), true);
                 return;
@@ -284,12 +285,16 @@ public class InteractionMixin {
         client.renderCubes(cubes);
     }
 
-    private static void followPath(Minecraft mc, Player player, ClientLevel level) {
+    private static void followPath(Minecraft mc, Player player, ClientLevel level, MinenavClient client) {
         if (path == null || pathOrigin == null || path.size() < 2) return;
 
         Vec3 nextNodePos = getNextNodePos();
-        if (nextNodePos.distanceTo(player.position()) < 1.5) {
+        if (nextNodePos.distanceTo(player.position()) < 0.5) {
             path.removeFirst();
+
+            // Rerender cubes
+            client.clearCubes();
+            renderPathCubes(client, path, pathOrigin);
         }
 
         if (path.size() < 2) {
@@ -300,30 +305,103 @@ public class InteractionMixin {
         BlockPos target = BlockPos.containing(getNextNodePos());
         int waypointsLeft = path.size();
 
-        if (shouldBridgeTo(level, target)) {
+        if (shouldBridgeTo(level, target, player)) {
             boolean shouldPillarUp = shouldPillarUpWhileBridging(player);
             doBridging(mc, player, level, target, waypointsLeft, shouldPillarUp);
             return;
         }
 
-        doWalkingAndPillaring(mc, player, level, target, waypointsLeft);
-    }
+	        doWalkingAndPillaring(mc, player, level, target, waypointsLeft);
+	    }
 
-    private static Vec3 getNextNodePos() {
-        return new Vec3(
-                pathOrigin.x + path.get(1)[0],
-                pathOrigin.y + path.get(1)[1],
+	    private static List<int[]> cutLShapeCorners(List<int[]> original) {
+	        if (original == null || original.size() < 3) return original;
+
+	        List<int[]> current = original;
+	        boolean changed;
+	        do {
+	            changed = false;
+	            List<int[]> out = new ArrayList<>(current.size());
+	            out.add(current.getFirst());
+
+	            for (int i = 1; i < current.size() - 1; i++) {
+	                int[] a = out.getLast();
+	                int[] b = current.get(i);
+	                int[] c = current.get(i + 1);
+
+	                if (isLShapeCorner(a, b, c)) {
+	                    changed = true;
+	                    continue;
+	                }
+	                out.add(b);
+	            }
+
+	            out.add(current.getLast());
+	            current = out;
+	        } while (changed && current.size() >= 3);
+
+	        return current;
+	    }
+
+	    private static boolean isLShapeCorner(int[] a, int[] b, int[] c) {
+	        int dx1 = b[0] - a[0];
+	        int dy1 = b[1] - a[1];
+	        int dz1 = b[2] - a[2];
+	        int dx2 = c[0] - b[0];
+	        int dy2 = c[1] - b[1];
+	        int dz2 = c[2] - b[2];
+
+	        if (manhattan(dx1, dy1, dz1) != 1) return false;
+	        if (manhattan(dx2, dy2, dz2) != 1) return false;
+
+	        // Must turn on a different axis (not continue straight).
+	        if ((dx1 != 0 && dx2 != 0) || (dy1 != 0 && dy2 != 0) || (dz1 != 0 && dz2 != 0)) return false;
+
+	        int dx = c[0] - a[0];
+	        int dy = c[1] - a[1];
+	        int dz = c[2] - a[2];
+
+	        // a and c must be diagonally adjacent (move 1 in exactly two axes).
+	        return manhattan(dx, dy, dz) == 2
+	                && Math.max(Math.abs(dx), Math.max(Math.abs(dy), Math.abs(dz))) == 1;
+	    }
+
+	    private static int manhattan(int dx, int dy, int dz) {
+	        return Math.abs(dx) + Math.abs(dy) + Math.abs(dz);
+	    }
+
+	    private static Vec3 getNextNodePos() {
+	        return new Vec3(
+	                pathOrigin.x + path.get(1)[0],
+	                pathOrigin.y + path.get(1)[1],
                 pathOrigin.z + path.get(1)[2]
         );
     }
 
-    private static boolean shouldBridgeTo(ClientLevel level, BlockPos target) {
+    private static boolean shouldBridgeTo(ClientLevel level, BlockPos target, Player player) {
+        // Check if the path block (which could be floating) actually is above us and should be pillared
+        if (target.getY() >= player.getY() + 0.5f) return false;
+
         return level.getBlockState(target.below()).getBlock() instanceof AirBlock;
     }
 
     private static boolean shouldPillarUpWhileBridging(Player player) {
         if (path == null || pathOrigin == null) return false;
         if (path.size() <= 3) return false;
+
+        Vec3 nextNodePos = getNextNodePos();
+        float distSqr = new Vec2((float) nextNodePos.x, (float) nextNodePos.z)
+                .distanceToSqr(new Vec2((float) player.position().x, (float) player.position().z));
+        double dy = nextNodePos.y - player.getY();
+
+        // Check if we should actually still bridge out a little bit
+        if (Math.abs(dy) < 0.001 || distSqr > 0.5f) {
+            MinenavClient.LOGGER.info("Skipping pillar up due to wrong position");
+            MinenavClient.LOGGER.info(String.valueOf(distSqr));
+            MinenavClient.LOGGER.info(String.valueOf(dy));
+            return false;
+        }
+
         double nextNextY = pathOrigin.y + path.get(2)[1];
         return nextNextY > player.getY();
     }
