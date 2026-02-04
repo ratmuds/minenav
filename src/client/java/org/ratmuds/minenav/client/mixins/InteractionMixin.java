@@ -74,6 +74,8 @@ public class InteractionMixin {
         MinenavClient client = MinenavClient.getInstance();
         if (!client.isNavigating()) {
             resetNavigationState();
+            client.clearHudNavigationState();
+            client.updatePathfindingState(false, false, false, false);
             return;
         }
 
@@ -83,12 +85,15 @@ public class InteractionMixin {
 
         if (end == null) {
             // No end set, can't navigate
+            updateHudState(client);
+            client.updatePathfindingState(false, false, false, false);
             return;
         }
 
         // Check if player near end
         if (start.distanceTo(end) < 0.5) {
             client.setNavigating(false);
+            client.updatePathfindingState(false, false, false, false);
             player.displayClientMessage(Component.literal("Completed pathfinding!"), true);
             return;
         }
@@ -98,6 +103,7 @@ public class InteractionMixin {
         maybeShowRecalculating(player);
         maybeStartPathfinding(mc, player, level, client, start, end, gameTime);
         followPath(mc, player, level, client);
+        updateHudState(client);
     }
 
     private static void updateLastSolidBlockBelow(Player player, ClientLevel level) {
@@ -291,7 +297,10 @@ public class InteractionMixin {
     }
 
     private static void followPath(Minecraft mc, Player player, ClientLevel level, MinenavClient client) {
-        if (path == null || pathOrigin == null || path.size() < 2) return;
+        if (path == null || pathOrigin == null || path.size() < 2) {
+            client.updatePathfindingState(false, false, false, false);
+            return;
+        }
 
         Vec3 nextNodePos = getNextNodePos();
         if (player.onGround() && player.blockPosition().equals(BlockPos.containing(nextNodePos))) {
@@ -303,6 +312,7 @@ public class InteractionMixin {
         }
 
         if (path.size() < 2) {
+            client.updatePathfindingState(false, false, false, false);
             player.displayClientMessage(Component.literal("Reached end of current path..."), true);
             return;
         }
@@ -312,11 +322,11 @@ public class InteractionMixin {
 
         if (shouldBridgeTo(level, target, player)) {
             boolean shouldPillarUp = shouldPillarUpWhileBridging(player);
-            doBridging(mc, player, level, target, waypointsLeft, shouldPillarUp);
+            doBridging(mc, player, level, client, target, waypointsLeft, shouldPillarUp);
             return;
         }
 
-        doWalkingAndPillaring(mc, player, level, target, waypointsLeft);
+        doWalkingAndPillaring(mc, player, level, client, target, waypointsLeft);
     }
 
     private static List<int[]> cutLShapeCorners(List<int[]> original) {
@@ -421,11 +431,17 @@ public class InteractionMixin {
         return nextNextY > player.getY();
     }
 
+    private static boolean shouldDigDown(Player player, ClientLevel level, BlockPos target) {
+        return !(level.getBlockState(target).getBlock() instanceof AirBlock);
+    }
+
     private static void resetMovementKeys(Minecraft mc) {
-        mc.options.keyJump.setDown(false);
-        mc.options.keyShift.setDown(false);
         mc.options.keyUse.setDown(false);
+        mc.options.keyShift.setDown(false);
         mc.options.keyDown.setDown(false);
+        mc.options.keyUp.setDown(true);
+        mc.options.keyJump.setDown(false);
+        mc.options.keyAttack.setDown(false);
     }
 
     private static void turnPlayerToward(Player player, BlockPos target) {
@@ -435,21 +451,31 @@ public class InteractionMixin {
         player.setYRot(wrapYawDegrees(degrees));
     }
 
-    private static void doWalkingAndPillaring(Minecraft mc, Player player, ClientLevel level, BlockPos target, int waypointsLeft) {
+    private static void doWalkingAndPillaring(Minecraft mc, Player player, ClientLevel level, MinenavClient client, BlockPos target, int waypointsLeft) {
         turnPlayerToward(player, target);
 
         mc.options.keyUp.setDown(true);
         resetMovementKeys(mc);
+        client.updatePathfindingState(false, false, false, false);
 
         if (shouldJumpUp(player, target)) {
             resetBridgeState();
+            client.updatePathfindingState(false, true, true, false);
             doPillarUp(mc, player, "Jumping... (" + waypointsLeft + " waypoints left)");
             return;
         }
 
         if (shouldPlaceUnderneath(player, level, target)) {
             resetBridgeState();
+            client.updatePathfindingState(false, false, false, true);
             doPlaceUnderneath(mc, player, "Placing block underneath... (" + waypointsLeft + " waypoints left)");
+            return;
+        }
+
+        if (shouldDigDown(player, level, target)) {
+            resetBridgeState();
+            client.updatePathfindingState(false, false, false, false);
+            doDigDown(mc, player, "Digging block down... (" + waypointsLeft + " waypoints left)");
             return;
         }
 
@@ -464,7 +490,7 @@ public class InteractionMixin {
                 && (level.getBlockState(target.subtract(new Vec3i(0, 2, 0))).getBlock() instanceof AirBlock);
         if (shouldBridgeSameLevel) {
             boolean shouldPillarUp = shouldPillarUpWhileBridging(player);
-            doBridging(mc, player, level, target, waypointsLeft, shouldPillarUp);
+            doBridging(mc, player, level, client, target, waypointsLeft, shouldPillarUp);
         } else {
             resetBridgeState();
         }
@@ -519,6 +545,19 @@ public class InteractionMixin {
         mc.options.keyDown.setDown(false);
         mc.options.keyUp.setDown(false);
         mc.options.keyJump.setDown(false);
+        mc.options.keyAttack.setDown(false);
+    }
+
+    private static void doDigDown(Minecraft mc, Player player, String statusMessage) {
+        player.displayClientMessage(Component.literal(statusMessage), true);
+        aimAtBlockTop(player, lastSolidBlockBelow);
+
+        mc.options.keyUse.setDown(false);
+        mc.options.keyShift.setDown(false);
+        mc.options.keyDown.setDown(false);
+        mc.options.keyUp.setDown(false);
+        mc.options.keyJump.setDown(false);
+        mc.options.keyAttack.setDown(true);
     }
 
     private static void resetBridgeState() {
@@ -527,10 +566,12 @@ public class InteractionMixin {
         bridgeFallbackActive = false;
     }
 
-    private static void doBridging(Minecraft mc, Player player, ClientLevel level, BlockPos target, int waypointsLeft, boolean shouldPillarUp) {
+    private static void doBridging(Minecraft mc, Player player, ClientLevel level, MinenavClient client, BlockPos target, int waypointsLeft, boolean shouldPillarUp) {
         turnPlayerToward(player, target);
         float bridgeYaw = wrapYawDegrees(player.getYRot() + 180.0);
         player.setYRot(bridgeYaw);
+
+        client.updatePathfindingState(true, shouldPillarUp, shouldPillarUp, false);
 
         // Bridging controls
         mc.options.keyShift.setDown(true);
@@ -632,7 +673,7 @@ public class InteractionMixin {
                         }
                         costs[i] = cost;
                     } else {
-                        costs[i] = Double.POSITIVE_INFINITY;
+                        costs[i] = 50.0;
                     }
                 }
             }
@@ -677,5 +718,19 @@ public class InteractionMixin {
         double horizontal = Math.sqrt((dx * dx) + (dz * dz));
         double pitch = -Math.toDegrees(Math.atan2(dy, horizontal));
         player.setXRot((float) pitch);
+    }
+
+    private static void updateHudState(MinenavClient client) {
+        boolean calculating = isCalculating.get();
+        int waypointsLeft = (path == null) ? 0 : Math.max(path.size() - 1, 0);
+        BlockPos nextTarget = null;
+        if (path != null && pathOrigin != null && path.size() >= 2) {
+            nextTarget = BlockPos.containing(
+                    pathOrigin.x + path.get(1)[0],
+                    pathOrigin.y + path.get(1)[1],
+                    pathOrigin.z + path.get(1)[2]
+            );
+        }
+        client.updateHudNavigationState(calculating, waypointsLeft, nextTarget);
     }
 }
