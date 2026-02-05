@@ -26,10 +26,13 @@ public class MinenavClient implements ClientModInitializer {
     private int hudFailedRecalcCount = 0;
     private int hudRecalcCooldownTicks = 0;
 
+    private boolean shouldDigDown = false;
+    private boolean shouldDigUp = false;
     private boolean shouldBridge = false;
-    private boolean shouldPillar = false;
     private boolean shouldJump = false;
     private boolean shouldPlaceUnderneath = false;
+    private boolean shouldDig = false;
+    private boolean shouldPillar = false;
 
     private String hudAction = "idle";
     private BlockPos hudActionTarget = null;
@@ -47,7 +50,7 @@ public class MinenavClient implements ClientModInitializer {
         this.isNavigating = navigating;
         if (!navigating) {
             clearHudNavigationState();
-            updatePathfindingState(false, false, false, false);
+            updatePathfindingState(false, false, false, false, false, false, false);
             clearCubes();
             // Reset keys when stopping
             Minecraft.getInstance().options.keyUp.setDown(false);
@@ -126,11 +129,14 @@ public class MinenavClient implements ClientModInitializer {
         return hudSelectedHotbarSlot;
     }
 
-    public void updatePathfindingState(boolean shouldBridge, boolean shouldPillar, boolean shouldJump, boolean shouldPlaceUnderneath) {
+    public void updatePathfindingState(boolean shouldDigDown, boolean shouldDigUp, boolean shouldBridge, boolean shouldJump, boolean shouldPlaceUnderneath, boolean shouldDig, boolean shouldPillar) {
+        this.shouldDigDown = shouldDigDown;
+        this.shouldDigUp = shouldDigUp;
         this.shouldBridge = shouldBridge;
-        this.shouldPillar = shouldPillar;
         this.shouldJump = shouldJump;
         this.shouldPlaceUnderneath = shouldPlaceUnderneath;
+        this.shouldDig = shouldDig;
+        this.shouldPillar = shouldPillar;
     }
 
     public boolean shouldBridge() {
@@ -147,6 +153,18 @@ public class MinenavClient implements ClientModInitializer {
 
     public boolean shouldPlaceUnderneath() {
         return shouldPlaceUnderneath;
+    }
+
+    public boolean shouldDigDown() {
+        return shouldDigDown;
+    }
+
+    public boolean shouldDigUp() {
+        return shouldDigUp;
+    }
+
+    public boolean shouldDig() {
+        return shouldDig;
     }
 
     public void clearHudNavigationState() {

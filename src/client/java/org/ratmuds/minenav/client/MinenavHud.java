@@ -194,17 +194,24 @@ final class MinenavHud {
         }
 
         lines.add(Line.text(4,
+                client.shouldDigDown()
+                        ? new Segment("OK", TAG_TXT, TAG_OK_BG)
+                        : new Segment("NO", TAG_TXT, TAG_NO_BG),
+                new Segment(" dig down", TXT_VALUE)
+        ));
+
+        lines.add(Line.text(0,
+                client.shouldDigUp()
+                        ? new Segment("OK", TAG_TXT, TAG_OK_BG)
+                        : new Segment("NO", TAG_TXT, TAG_NO_BG),
+                new Segment(" dig up", TXT_VALUE)
+        ));
+
+        lines.add(Line.text(0,
                 client.shouldBridge()
                         ? new Segment("OK", TAG_TXT, TAG_OK_BG)
                         : new Segment("NO", TAG_TXT, TAG_NO_BG),
                 new Segment(" bridge", TXT_VALUE)
-        ));
-
-        lines.add(Line.text(0,
-                client.shouldPillar()
-                        ? new Segment("OK", TAG_TXT, TAG_OK_BG)
-                        : new Segment("NO", TAG_TXT, TAG_NO_BG),
-                new Segment(" pillar", TXT_VALUE)
         ));
 
         lines.add(Line.text(0,
@@ -219,6 +226,20 @@ final class MinenavHud {
                         ? new Segment("OK", TAG_TXT, TAG_OK_BG)
                         : new Segment("NO", TAG_TXT, TAG_NO_BG),
                 new Segment(" place underneath", TXT_VALUE)
+        ));
+
+        lines.add(Line.text(0,
+                client.shouldDig()
+                        ? new Segment("OK", TAG_TXT, TAG_OK_BG)
+                        : new Segment("NO", TAG_TXT, TAG_NO_BG),
+                new Segment(" dig", TXT_VALUE)
+        ));
+
+        lines.add(Line.text(0,
+                client.shouldPillar()
+                        ? new Segment("OK", TAG_TXT, TAG_OK_BG)
+                        : new Segment("NO", TAG_TXT, TAG_NO_BG),
+                new Segment(" pillar", TXT_VALUE)
         ));
 
         int x0 = 5;
