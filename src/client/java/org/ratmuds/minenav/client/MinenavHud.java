@@ -4,6 +4,8 @@ import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
@@ -45,11 +47,50 @@ final class MinenavHud {
             elements.add(new TextElement("[ ready ]", WHITE, 10));
         }
 
+        String hand = mc.player.getMainHandItem().isEmpty()
+                ? "empty"
+                : mc.player.getMainHandItem().getHoverName().getString();
+        int slot = client.getHudSelectedHotbarSlot();
+        elements.add(new TextElement("[ hand ] " + (slot >= 0 ? (slot + 1) + ":" : "") + hand, WHITE, 10));
+
+        String action = client.getHudAction();
+        elements.add(new TextElement("[ action ] " + action, WHITE, 0));
+
+        BlockPos actionTarget = client.getHudActionTarget();
+        if (actionTarget != null && mc.level != null) {
+            BlockState st = mc.level.getBlockState(actionTarget);
+            String blockName = st.getBlock().getDescriptionId();
+            ItemStack asItem = new ItemStack(st.getBlock().asItem());
+            if (!asItem.isEmpty()) {
+                blockName = asItem.getHoverName().getString();
+            }
+            elements.add(new TextElement("[ target ] " + actionTarget.getX() + " " + actionTarget.getY() + " " + actionTarget.getZ() + " " + blockName, WHITE, 0));
+        }
+
+        Vec3 end = client.getEndPos();
+        if (end != null) {
+            BlockPos endBlock = BlockPos.containing(end);
+            elements.add(new TextElement("[ end ] " + endBlock.getX() + " " + endBlock.getY() + " " + endBlock.getZ(), WHITE, 10));
+            double dist = mc.player.position().distanceTo(end);
+            double distRounded = Math.round(dist * 10.0) / 10.0;
+            elements.add(new TextElement("[ dist ] " + distRounded + "m", WHITE, 0));
+        }
+
         // Pathfinding group
         elements.add(new TextElement("[ pathfinding ]", WHITE, 10));
 
         if (client.isHudCalculatingPath()) {
             elements.add(new TextElement("[ recalculating ]", WHITE, 0));
+        }
+
+        BlockPos next = client.getHudNextTarget();
+        if (next != null) {
+            elements.add(new TextElement("[ next ] " + next.getX() + " " + next.getY() + " " + next.getZ(), WHITE, 0));
+        }
+
+        int waypoints = client.getHudWaypointsLeft();
+        if (waypoints > 0) {
+            elements.add(new TextElement("[ waypoints ] " + waypoints, WHITE, 0));
         }
 
         if (client.shouldBridge()) {

@@ -29,6 +29,10 @@ public class MinenavClient implements ClientModInitializer {
     private boolean shouldJump = false;
     private boolean shouldPlaceUnderneath = false;
 
+    private String hudAction = "idle";
+    private BlockPos hudActionTarget = null;
+    private int hudSelectedHotbarSlot = -1;
+
     public static MinenavClient getInstance() {
         return instance;
     }
@@ -42,7 +46,7 @@ public class MinenavClient implements ClientModInitializer {
         if (!navigating) {
             clearHudNavigationState();
             updatePathfindingState(false, false, false, false);
-            //clearCubes();
+            clearCubes();
             // Reset keys when stopping
             Minecraft.getInstance().options.keyUp.setDown(false);
             Minecraft.getInstance().options.keyDown.setDown(false);
@@ -89,6 +93,24 @@ public class MinenavClient implements ClientModInitializer {
         this.hudNextTarget = nextTarget;
     }
 
+    public void updateHudActionState(String action, BlockPos target, int selectedHotbarSlot) {
+        this.hudAction = (action == null || action.isBlank()) ? "idle" : action;
+        this.hudActionTarget = target;
+        this.hudSelectedHotbarSlot = selectedHotbarSlot;
+    }
+
+    public String getHudAction() {
+        return hudAction;
+    }
+
+    public BlockPos getHudActionTarget() {
+        return hudActionTarget;
+    }
+
+    public int getHudSelectedHotbarSlot() {
+        return hudSelectedHotbarSlot;
+    }
+
     public void updatePathfindingState(boolean shouldBridge, boolean shouldPillar, boolean shouldJump, boolean shouldPlaceUnderneath) {
         this.shouldBridge = shouldBridge;
         this.shouldPillar = shouldPillar;
@@ -114,6 +136,7 @@ public class MinenavClient implements ClientModInitializer {
 
     public void clearHudNavigationState() {
         updateHudNavigationState(false, 0, null);
+        updateHudActionState("idle", null, -1);
     }
 
     @Override

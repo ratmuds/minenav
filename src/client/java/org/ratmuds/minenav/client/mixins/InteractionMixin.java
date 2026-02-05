@@ -6,9 +6,13 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Vec3i;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
+import net.minecraft.world.item.BlockItem;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.level.block.AirBlock;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.FallingBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec2;
 import net.minecraft.world.phys.Vec3;
@@ -70,6 +74,8 @@ public class InteractionMixin {
 
         updateLastSolidBlockBelow(player, level);
 
+        Inventory inv = player.getInventory();
+
         // Get the client instance
         MinenavClient client = MinenavClient.getInstance();
         if (!client.isNavigating()) {
@@ -87,6 +93,7 @@ public class InteractionMixin {
             // No end set, can't navigate
             updateHudState(client);
             client.updatePathfindingState(false, false, false, false);
+            client.updateHudActionState("idle", null, player.getInventory().getSelectedSlot());
             return;
         }
 
@@ -299,6 +306,7 @@ public class InteractionMixin {
     private static void followPath(Minecraft mc, Player player, ClientLevel level, MinenavClient client) {
         if (path == null || pathOrigin == null || path.size() < 2) {
             client.updatePathfindingState(false, false, false, false);
+            client.updateHudActionState("idle", null, player.getInventory().getSelectedSlot());
             return;
         }
 
@@ -313,6 +321,7 @@ public class InteractionMixin {
 
         if (path.size() < 2) {
             client.updatePathfindingState(false, false, false, false);
+            client.updateHudActionState("idle", null, player.getInventory().getSelectedSlot());
             player.displayClientMessage(Component.literal("Reached end of current path..."), true);
             return;
         }
@@ -323,6 +332,11 @@ public class InteractionMixin {
         if (shouldDigDown(player, level, target)) {
             resetBridgeState();
             client.updatePathfindingState(false, false, false, false);
+            BlockPos digPos = lastSolidBlockBelow;
+            if (digPos != null) {
+                ensureBestToolSelected(player, level.getBlockState(digPos));
+            }
+            client.updateHudActionState("dig_down", digPos, player.getInventory().getSelectedSlot());
             doDigDown(mc, player, "Digging block down... (" + waypointsLeft + " waypoints left)");
             return;
         }
@@ -330,6 +344,11 @@ public class InteractionMixin {
         if (shouldDigUp(player, level, target)) {
             resetBridgeState();
             client.updatePathfindingState(false, false, false, false);
+            BlockPos digPos = (lastSolidBlockBelow == null) ? null : lastSolidBlockBelow.above(2);
+            if (digPos != null) {
+                ensureBestToolSelected(player, level.getBlockState(digPos));
+            }
+            client.updateHudActionState("dig_up", digPos, player.getInventory().getSelectedSlot());
             doDigUp(mc, player, "Digging block up... (" + waypointsLeft + " waypoints left)");
             return;
         }
@@ -408,6 +427,11 @@ public class InteractionMixin {
     }
 
     private static boolean shouldBridgeTo(ClientLevel level, BlockPos target, Player player) {
+        if (path == null || path.size() <= 3) return false;
+
+        // Check if it's just a drop
+        if (path.get(2)[1] <= player.getY()) return false;
+
         // Check if the path block (which could be floating) actually is above us and should be pillared
         if (target.getY() >= player.getY() + 0.5f) return false;
 
@@ -458,6 +482,8 @@ public class InteractionMixin {
     }
 
     private static boolean shouldDigUp(Player player, ClientLevel level, BlockPos target) {
+        if (player.getY() >= target.getY()) return false;
+
         Vec3 nextNodePos = getNextNodePos();
         float distSqr = new Vec2((float) nextNodePos.x, (float) nextNodePos.z)
                 .distanceToSqr(new Vec2((float) player.position().x, (float) player.position().z));
@@ -496,10 +522,13 @@ public class InteractionMixin {
         mc.options.keyUp.setDown(true);
         resetMovementKeys(mc);
         client.updatePathfindingState(false, false, false, false);
+        client.updateHudActionState("walk", target, player.getInventory().getSelectedSlot());
 
         if (shouldJumpUp(player, level, target)) {
             resetBridgeState();
             client.updatePathfindingState(false, true, true, false);
+            ensurePlaceBlockSelected(player, level);
+            client.updateHudActionState("pillar", target, player.getInventory().getSelectedSlot());
             doPillarUp(mc, player, "Jumping... (" + waypointsLeft + " waypoints left)");
             return;
         }
@@ -507,6 +536,8 @@ public class InteractionMixin {
         if (shouldPlaceUnderneath(player, level, target)) {
             resetBridgeState();
             client.updatePathfindingState(false, false, false, true);
+            ensurePlaceBlockSelected(player, level);
+            client.updateHudActionState("place_under", lastSolidBlockBelow, player.getInventory().getSelectedSlot());
             doPlaceUnderneath(mc, player, "Placing block underneath... (" + waypointsLeft + " waypoints left)");
             return;
         }
@@ -514,6 +545,11 @@ public class InteractionMixin {
         if (shouldDig(player, level, target)) {
             resetBridgeState();
             client.updatePathfindingState(false, false, false, false);
+            BlockPos breakPos = firstNonAirBreakPos(level, target);
+            if (breakPos != null) {
+                ensureBestToolSelected(player, level.getBlockState(breakPos));
+            }
+            client.updateHudActionState("break", breakPos, player.getInventory().getSelectedSlot());
             doBreakBlocks(mc, player, target, level, "Breaking blocks... (" + waypointsLeft + " waypoints left)");
             return;
         }
@@ -546,6 +582,10 @@ public class InteractionMixin {
     private static boolean shouldPlaceUnderneath(Player player, ClientLevel level, BlockPos target) {
         if (player.onGround()) return false;
         if (lastSolidBlockBelow == null) return false;
+
+        // Check if the path is actually supposed to go down
+        if (path == null || path.size() <= 3) return false;
+        if (path.get(2)[1] <= player.getY()) return false;
 
         boolean canJumpToTarget = lastSolidBlockBelow.getY() + 1.25 >= target.getY();
         boolean targetHasSupport = !(level.getBlockState(target.below()).getBlock() instanceof AirBlock);
@@ -588,6 +628,7 @@ public class InteractionMixin {
     }
 
     private static void doDigDown(Minecraft mc, Player player, String statusMessage) {
+        if (lastSolidBlockBelow == null) return;
         player.displayClientMessage(Component.literal(statusMessage), true);
         aimAtBlockTop(player, lastSolidBlockBelow);
         aimPitchAtBlockTop(player, lastSolidBlockBelow);
@@ -601,6 +642,7 @@ public class InteractionMixin {
     }
 
     private static void doDigUp(Minecraft mc, Player player, String statusMessage) {
+        if (lastSolidBlockBelow == null) return;
         player.displayClientMessage(Component.literal(statusMessage), true);
         aimAtBlockTop(player, lastSolidBlockBelow.above(2));
         player.setXRot(-90);
@@ -614,14 +656,7 @@ public class InteractionMixin {
     }
 
     private static void doBreakBlocks(Minecraft mc, Player player, BlockPos target, ClientLevel level, String statusMessage) {
-        BlockPos pos = null;
-
-        if (!(level.getBlockState(target).getBlock() instanceof AirBlock)) {
-            pos = target;
-        } else if (!(level.getBlockState(target.above()).getBlock() instanceof AirBlock)) {
-            pos = target.above();
-        }
-
+        BlockPos pos = firstNonAirBreakPos(level, target);
         if (pos == null) return;
 
         player.displayClientMessage(Component.literal(statusMessage), true);
@@ -648,6 +683,8 @@ public class InteractionMixin {
         player.setYRot(bridgeYaw);
 
         client.updatePathfindingState(true, shouldPillarUp, shouldPillarUp, false);
+        ensurePlaceBlockSelected(player, level);
+        client.updateHudActionState(shouldPillarUp ? "bridge_pillar" : "bridge", target, player.getInventory().getSelectedSlot());
 
         // Bridging controls
         mc.options.keyShift.setDown(true);
@@ -686,6 +723,85 @@ public class InteractionMixin {
         player.displayClientMessage(message, true);
 
         updateBridgeFallback(player, posBelow);
+    }
+
+    private static BlockPos firstNonAirBreakPos(ClientLevel level, BlockPos target) {
+        if (!(level.getBlockState(target).getBlock() instanceof AirBlock)) {
+            return target;
+        }
+        if (!(level.getBlockState(target.above()).getBlock() instanceof AirBlock)) {
+            return target.above();
+        }
+        return null;
+    }
+
+    private static void ensureBestToolSelected(Player player, BlockState state) {
+        if (state.getBlock() instanceof AirBlock) return;
+
+        Inventory inventory = player.getInventory();
+        int current = inventory.getSelectedSlot();
+
+        int bestSlot = -1;
+        float bestSpeed = -1.0f;
+        boolean bestCorrect = false;
+
+        for (int slot = 0; slot < 9; slot++) {
+            ItemStack stack = inventory.getItem(slot);
+            if (stack.isEmpty()) continue;
+
+            float speed = stack.getDestroySpeed(state);
+            boolean correct = stack.isCorrectToolForDrops(state);
+
+            if (bestSlot == -1
+                    || (correct && !bestCorrect)
+                    || (correct == bestCorrect && speed > bestSpeed + 0.0001f)) {
+                bestSlot = slot;
+                bestSpeed = speed;
+                bestCorrect = correct;
+            }
+        }
+
+        if (bestSlot != -1 && bestSlot != current) {
+            inventory.setSelectedSlot(bestSlot);
+        }
+    }
+
+    private static void ensurePlaceBlockSelected(Player player, ClientLevel level) {
+        Inventory inventory = player.getInventory();
+        int current = inventory.getSelectedSlot();
+
+        int bestSlot = -1;
+        float bestHardness = Float.POSITIVE_INFINITY;
+        int bestCount = -1;
+
+        BlockPos hardnessPos = player.blockPosition();
+
+        for (int slot = 0; slot < 9; slot++) {
+            ItemStack stack = inventory.getItem(slot);
+            if (stack.isEmpty()) continue;
+
+            if (!(stack.getItem() instanceof BlockItem blockItem)) continue;
+
+            Block block = blockItem.getBlock();
+            if (block instanceof AirBlock) continue;
+            if (block instanceof FallingBlock) continue;
+
+            BlockState placeState = block.defaultBlockState();
+            float hardness = placeState.getDestroySpeed(level, hardnessPos);
+            if (hardness < 0.0f) continue;
+
+            int count = stack.getCount();
+            if (hardness < bestHardness - 0.0001f
+                    || (Math.abs(hardness - bestHardness) <= 0.0001f && count > bestCount)) {
+                bestHardness = hardness;
+                bestSlot = slot;
+                bestCount = count;
+            }
+        }
+
+        if (bestSlot != -1 && bestSlot != current) {
+            inventory.setSelectedSlot(bestSlot);
+        }
     }
 
     private static void updateBridgeFallback(Player player, BlockPos posBelow) {
