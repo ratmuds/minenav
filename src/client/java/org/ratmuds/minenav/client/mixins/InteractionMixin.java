@@ -483,6 +483,8 @@ public class InteractionMixin {
 
     private static boolean shouldDigUp(Player player, ClientLevel level, BlockPos target) {
         if (player.getY() >= target.getY()) return false;
+        if (lastSolidBlockBelow == null) return false;
+        if (lastSolidBlockBelow.getY() + 1.25f >= target.getY()) return false;
 
         Vec3 nextNodePos = getNextNodePos();
         float distSqr = new Vec2((float) nextNodePos.x, (float) nextNodePos.z)
@@ -493,11 +495,20 @@ public class InteractionMixin {
             return false;
         }
 
-        return !(level.getBlockState(target.above(2)).getBlock() instanceof AirBlock);
+        return !(level.getBlockState(lastSolidBlockBelow.above(2)).getBlock() instanceof AirBlock);
     }
 
     private static boolean shouldDig(Player player, ClientLevel level, BlockPos target) {
-        return !(level.getBlockState(target).getBlock() instanceof AirBlock) || !(level.getBlockState(target.above()).getBlock() instanceof AirBlock);
+        boolean targetNeedDig = !(level.getBlockState(target).getBlock() instanceof AirBlock) || !(level.getBlockState(target.above()).getBlock() instanceof AirBlock);
+        MinenavClient.LOGGER.info("Target need dig: " + targetNeedDig);
+        if (path == null || path.size() <= 2) return targetNeedDig;
+
+        boolean pathAheadNeedDig = !(level.getBlockState(new BlockPos(path.get(1)[0], path.get(1)[1], path.get(1)[2])).getBlock() instanceof AirBlock) || !(level.getBlockState(new BlockPos(path.get(1)[0], path.get(1)[1] + 1, path.get(1)[2])).getBlock() instanceof AirBlock);
+        boolean pathAheadAheadNeedDig = path.size() >= 3 && (!(level.getBlockState(new BlockPos(path.get(2)[0], path.get(2)[1], path.get(2)[2])).getBlock() instanceof AirBlock) || !(level.getBlockState(new BlockPos(path.get(2)[0], path.get(2)[1] + 1, path.get(2)[2])).getBlock() instanceof AirBlock));
+        MinenavClient.LOGGER.info("Path ahead need dig: " + pathAheadNeedDig);
+        MinenavClient.LOGGER.info("Path ahead ahead need dig: " + pathAheadAheadNeedDig);
+
+        return targetNeedDig || pathAheadNeedDig || pathAheadAheadNeedDig;
     }
 
     private static void resetMovementKeys(Minecraft mc) {
@@ -580,19 +591,26 @@ public class InteractionMixin {
     }
 
     private static boolean shouldPlaceUnderneath(Player player, ClientLevel level, BlockPos target) {
-        if (player.onGround()) return false;
         if (lastSolidBlockBelow == null) return false;
 
+        // Check if we actually need to go up
+        if (lastSolidBlockBelow.getY() + 1.25f >= target.getY()) return false;
+
+        // Check if there is a block above our head
+        if (!(level.getBlockState(target.above(2)).getBlock() instanceof AirBlock)) return false;
+
         // Check if the path is actually supposed to go down
-        if (path == null || path.size() <= 3) return false;
-        if (path.get(2)[1] <= player.getY()) return false;
+        if (path == null || path.size() <= 3) {
+            // Simpler fallback
+            return lastSolidBlockBelow.getY() + 1.25f <= target.getY();
+        };
 
         boolean canJumpToTarget = lastSolidBlockBelow.getY() + 1.25 >= target.getY();
         boolean targetHasSupport = !(level.getBlockState(target.below()).getBlock() instanceof AirBlock);
+
         if (canJumpToTarget && targetHasSupport) return false;
 
         // Only attempt placing if we're actually over air and have a valid "base" block to place onto.
-        if (!(level.getBlockState(player.getBlockPosBelowThatAffectsMyMovement()).getBlock() instanceof AirBlock)) return false;
         if (!(level.getBlockState(lastSolidBlockBelow.above()).getBlock() instanceof AirBlock)) return false;
 
         return true;
@@ -623,7 +641,7 @@ public class InteractionMixin {
         mc.options.keyShift.setDown(false);
         mc.options.keyDown.setDown(false);
         mc.options.keyUp.setDown(false);
-        mc.options.keyJump.setDown(false);
+        mc.options.keyJump.setDown(true);
         mc.options.keyAttack.setDown(false);
     }
 
@@ -726,12 +744,44 @@ public class InteractionMixin {
     }
 
     private static BlockPos firstNonAirBreakPos(ClientLevel level, BlockPos target) {
+        // Check target position and above
         if (!(level.getBlockState(target).getBlock() instanceof AirBlock)) {
             return target;
         }
         if (!(level.getBlockState(target.above()).getBlock() instanceof AirBlock)) {
             return target.above();
         }
+        
+        // Check path ahead (path.get(1)) - the next node
+        if (path != null && path.size() >= 2) {
+            BlockPos pathAhead = BlockPos.containing(
+                pathOrigin.x + path.get(1)[0],
+                pathOrigin.y + path.get(1)[1],
+                pathOrigin.z + path.get(1)[2]
+            );
+            if (!(level.getBlockState(pathAhead).getBlock() instanceof AirBlock)) {
+                return pathAhead;
+            }
+            if (!(level.getBlockState(pathAhead.above()).getBlock() instanceof AirBlock)) {
+                return pathAhead.above();
+            }
+        }
+        
+        // Check path ahead ahead (path.get(2))
+        if (path != null && path.size() >= 3) {
+            BlockPos pathAheadAhead = BlockPos.containing(
+                pathOrigin.x + path.get(2)[0],
+                pathOrigin.y + path.get(2)[1],
+                pathOrigin.z + path.get(2)[2]
+            );
+            if (!(level.getBlockState(pathAheadAhead).getBlock() instanceof AirBlock)) {
+                return pathAheadAhead;
+            }
+            if (!(level.getBlockState(pathAheadAhead.above()).getBlock() instanceof AirBlock)) {
+                return pathAheadAhead.above();
+            }
+        }
+        
         return null;
     }
 
@@ -924,5 +974,10 @@ public class InteractionMixin {
             );
         }
         client.updateHudNavigationState(calculating, waypointsLeft, nextTarget);
+
+        Minecraft mc = Minecraft.getInstance();
+        long gameTime = (mc != null && mc.level != null) ? mc.level.getGameTime() : 0;
+        int cooldownTicks = (nextRecalcGameTime > gameTime) ? (int) Math.min(Integer.MAX_VALUE, (nextRecalcGameTime - gameTime)) : 0;
+        client.updateHudDiagnosticsState(failedRecalcCount, cooldownTicks);
     }
 }

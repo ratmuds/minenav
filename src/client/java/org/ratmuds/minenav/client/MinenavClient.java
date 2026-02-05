@@ -23,6 +23,8 @@ public class MinenavClient implements ClientModInitializer {
     private boolean hudCalculatingPath = false;
     private int hudWaypointsLeft = 0;
     private BlockPos hudNextTarget = null;
+    private int hudFailedRecalcCount = 0;
+    private int hudRecalcCooldownTicks = 0;
 
     private boolean shouldBridge = false;
     private boolean shouldPillar = false;
@@ -93,6 +95,19 @@ public class MinenavClient implements ClientModInitializer {
         this.hudNextTarget = nextTarget;
     }
 
+    public void updateHudDiagnosticsState(int failedRecalcCount, int recalcCooldownTicks) {
+        this.hudFailedRecalcCount = Math.max(failedRecalcCount, 0);
+        this.hudRecalcCooldownTicks = Math.max(recalcCooldownTicks, 0);
+    }
+
+    public int getHudFailedRecalcCount() {
+        return hudFailedRecalcCount;
+    }
+
+    public int getHudRecalcCooldownTicks() {
+        return hudRecalcCooldownTicks;
+    }
+
     public void updateHudActionState(String action, BlockPos target, int selectedHotbarSlot) {
         this.hudAction = (action == null || action.isBlank()) ? "idle" : action;
         this.hudActionTarget = target;
@@ -137,6 +152,7 @@ public class MinenavClient implements ClientModInitializer {
     public void clearHudNavigationState() {
         updateHudNavigationState(false, 0, null);
         updateHudActionState("idle", null, -1);
+        updateHudDiagnosticsState(0, 0);
     }
 
     @Override

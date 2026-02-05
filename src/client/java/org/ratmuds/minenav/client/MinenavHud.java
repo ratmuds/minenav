@@ -11,23 +11,74 @@ import net.minecraft.world.phys.Vec3;
 import java.util.ArrayList;
 import java.util.List;
 
-class TextElement {
-    String text;
-    int color;
-    int marginTop;
-
-    TextElement(String text, int color, int marginTop) {
-        this.text = text;
-        this.color = color;
-        this.marginTop = marginTop;
-    }
-}
-
 final class MinenavHud {
-    private static final int WHITE = 0xFFFFFFFF;
+    private static final int PANEL_BG = 0x77000000;
+    private static final int PANEL_BORDER = 0xAA111111;
+
+    private static final int TXT_TITLE = 0xFFFFFFFF;
+    private static final int TXT_LABEL = 0xFFAAAAAA;
+    private static final int TXT_VALUE = 0xFFEFEFEF;
+    private static final int TXT_MUTED = 0xFF888888;
+
+    private static final int TAG_OK_BG = 0xFF1E7A1E;
+    private static final int TAG_NO_BG = 0xFF8A1F1F;
+    private static final int TAG_WARN_BG = 0xFF8A6B00;
+    private static final int TAG_INFO_BG = 0xFF1F5F8A;
+    private static final int TAG_TXT = 0xFFFFFFFF;
+
     private static final int PADDING = 6;
+    private static final int TAG_PAD_X = 3;
 
     private MinenavHud() {
+    }
+
+    private static final class Segment {
+        final String text;
+        final int color;
+        final Integer bgColor; // when non-null, draw a pill background
+
+        Segment(String text, int color) {
+            this(text, color, null);
+        }
+
+        Segment(String text, int color, Integer bgColor) {
+            this.text = text;
+            this.color = color;
+            this.bgColor = bgColor;
+        }
+    }
+
+    private static final class Line {
+        final List<Segment> segments = new ArrayList<>();
+        final int marginTop;
+        final boolean separator;
+
+        private Line(int marginTop, boolean separator) {
+            this.marginTop = marginTop;
+            this.separator = separator;
+        }
+
+        static Line separator(int marginTop) {
+            return new Line(marginTop, true);
+        }
+
+        static Line text(int marginTop, Segment... segments) {
+            Line line = new Line(marginTop, false);
+            line.segments.addAll(List.of(segments));
+            return line;
+        }
+    }
+
+    private static int lineWidth(Minecraft mc, Line line) {
+        int width = 0;
+        for (Segment seg : line.segments) {
+            int segW = mc.font.width(seg.text);
+            if (seg.bgColor != null) {
+                segW += TAG_PAD_X * 2;
+            }
+            width += segW;
+        }
+        return width;
     }
 
     static void onHudRender(GuiGraphics graphics, DeltaTracker tickDelta) {
@@ -37,24 +88,33 @@ final class MinenavHud {
         MinenavClient client = MinenavClient.getInstance();
         if (client == null) return;
 
-        List<TextElement> elements = new ArrayList<>();
-        elements.add(new TextElement("minenav", WHITE, 0));
+        List<Line> lines = new ArrayList<>();
+        lines.add(Line.text(0,
+                new Segment("minenav", TXT_TITLE),
+                new Segment("  ", TXT_TITLE),
+                client.isNavigating()
+                        ? new Segment("[RUNNING]", TAG_TXT, TAG_INFO_BG)
+                        : new Segment("[READY]", TAG_TXT, TAG_OK_BG)
+        ));
 
-        // Status group
-        if (client.isNavigating()) {
-            elements.add(new TextElement("[ running ]", WHITE, 10));
-        } else {
-            elements.add(new TextElement("[ ready ]", WHITE, 10));
-        }
+        lines.add(Line.separator(6));
 
         String hand = mc.player.getMainHandItem().isEmpty()
                 ? "empty"
                 : mc.player.getMainHandItem().getHoverName().getString();
         int slot = client.getHudSelectedHotbarSlot();
-        elements.add(new TextElement("[ hand ] " + (slot >= 0 ? (slot + 1) + ":" : "") + hand, WHITE, 10));
+        lines.add(Line.text(6,
+                new Segment("[hand]", TXT_LABEL),
+                new Segment(" ", TXT_MUTED),
+                new Segment((slot >= 0 ? (slot + 1) + ": " : "") + hand, TXT_VALUE)
+        ));
 
         String action = client.getHudAction();
-        elements.add(new TextElement("[ action ] " + action, WHITE, 0));
+        lines.add(Line.text(0,
+                new Segment("[action]", TXT_LABEL),
+                new Segment(" ", TXT_MUTED),
+                new Segment(action, TXT_VALUE)
+        ));
 
         BlockPos actionTarget = client.getHudActionTarget();
         if (actionTarget != null && mc.level != null) {
@@ -64,116 +124,148 @@ final class MinenavHud {
             if (!asItem.isEmpty()) {
                 blockName = asItem.getHoverName().getString();
             }
-            elements.add(new TextElement("[ target ] " + actionTarget.getX() + " " + actionTarget.getY() + " " + actionTarget.getZ() + " " + blockName, WHITE, 0));
+            lines.add(Line.text(0,
+                    new Segment("[target]", TXT_LABEL),
+                    new Segment(" ", TXT_MUTED),
+                    new Segment(actionTarget.getX() + " " + actionTarget.getY() + " " + actionTarget.getZ(), TXT_VALUE),
+                    new Segment("  ", TXT_MUTED),
+                    new Segment(blockName, TXT_MUTED)
+            ));
         }
 
         Vec3 end = client.getEndPos();
         if (end != null) {
             BlockPos endBlock = BlockPos.containing(end);
-            elements.add(new TextElement("[ end ] " + endBlock.getX() + " " + endBlock.getY() + " " + endBlock.getZ(), WHITE, 10));
+            lines.add(Line.text(6,
+                    new Segment("[end]", TXT_LABEL),
+                    new Segment(" ", TXT_MUTED),
+                    new Segment(endBlock.getX() + " " + endBlock.getY() + " " + endBlock.getZ(), TXT_VALUE)
+            ));
             double dist = mc.player.position().distanceTo(end);
             double distRounded = Math.round(dist * 10.0) / 10.0;
-            elements.add(new TextElement("[ dist ] " + distRounded + "m", WHITE, 0));
+            lines.add(Line.text(0,
+                    new Segment("[dist]", TXT_LABEL),
+                    new Segment(" ", TXT_MUTED),
+                    new Segment(distRounded + "m", TXT_VALUE)
+            ));
         }
 
         // Pathfinding group
-        elements.add(new TextElement("[ pathfinding ]", WHITE, 10));
+        lines.add(Line.separator(8));
+        lines.add(Line.text(4, new Segment("pathfinding", TXT_TITLE)));
 
         if (client.isHudCalculatingPath()) {
-            elements.add(new TextElement("[ recalculating ]", WHITE, 0));
+            lines.add(Line.text(4, new Segment("CALC", TAG_TXT, TAG_WARN_BG), new Segment(" recalculating", TXT_VALUE)));
         }
 
         BlockPos next = client.getHudNextTarget();
         if (next != null) {
-            elements.add(new TextElement("[ next ] " + next.getX() + " " + next.getY() + " " + next.getZ(), WHITE, 0));
+            lines.add(Line.text(0,
+                    new Segment("[next]", TXT_LABEL),
+                    new Segment(" ", TXT_MUTED),
+                    new Segment(next.getX() + " " + next.getY() + " " + next.getZ(), TXT_VALUE)
+            ));
         }
 
         int waypoints = client.getHudWaypointsLeft();
         if (waypoints > 0) {
-            elements.add(new TextElement("[ waypoints ] " + waypoints, WHITE, 0));
+            lines.add(Line.text(0,
+                    new Segment("[waypoints]", TXT_LABEL),
+                    new Segment(" ", TXT_MUTED),
+                    new Segment(String.valueOf(waypoints), TXT_VALUE)
+            ));
         }
 
-        if (client.shouldBridge()) {
-            elements.add(new TextElement("[ OK ] bridge", WHITE, 0));
-        } else {
-            elements.add(new TextElement("[ NO ] bridge", WHITE, 0));
-        }
-
-        if (client.shouldPillar()) {
-            elements.add(new TextElement("[ OK ] pillar", WHITE, 0));
-        } else {
-            elements.add(new TextElement("[ NO ] pillar", WHITE, 0));
-        }
-
-        if (client.shouldJump()) {
-            elements.add(new TextElement("[ OK ] jump", WHITE, 0));
-        } else {
-            elements.add(new TextElement("[ NO ] jump", WHITE, 0));
-        }
-
-        if (client.shouldPlaceUnderneath()) {
-            elements.add(new TextElement("[ OK ] place underneath", WHITE, 0));
-        } else {
-            elements.add(new TextElement("[ NO ] place underneath", WHITE, 0));
-        }
-
-        // Draw text
-        int currentY = 5;
-        for (TextElement element : elements) {
-            currentY += element.marginTop;
-            graphics.drawString(mc.font, element.text, 5, currentY, element.color, true);
-            currentY += mc.font.lineHeight;
-        }
-
-        return;
-
-        /*boolean navigating = client.isNavigating();
-        Vec3 end = client.getEndPos();
-        if (!navigating && end == null) return;
-
-        int x = PADDING;
-        int y = PADDING;
-        int line = mc.font.lineHeight + 2;
-
-        String status = navigating
-                ? (client.isHudCalculatingPath() ? "MineNav: recalculating..." : "MineNav: navigating")
-                : "MineNav: ready";
-        graphics.drawString(mc.font, status, x, y, WHITE, true);
-        y += line;
-
-        if (navigating) {
-            String action;
-            if (client.shouldPlaceUnderneath()) action = "Action: place underneath";
-            else if (client.shouldBridge() && client.shouldPillar()) action = "Action: bridge + pillar";
-            else if (client.shouldBridge()) action = "Action: bridge";
-            else if (client.shouldPillar()) action = "Action: pillar";
-            else if (client.shouldJump()) action = "Action: jump";
-            else action = "Action: walk";
-            graphics.drawString(mc.font, action, x, y, WHITE, true);
-            y += line;
-        }
-
-        if (end != null) {
-            BlockPos endBlock = BlockPos.containing(end);
-            graphics.drawString(mc.font, "End: " + endBlock.getX() + " " + endBlock.getY() + " " + endBlock.getZ(), x, y, WHITE, true);
-            y += line;
-
-            double dist = mc.player.position().distanceTo(end);
-            double distRounded = Math.round(dist * 10.0) / 10.0;
-            graphics.drawString(mc.font, "Dist: " + distRounded + "m", x, y, WHITE, true);
-            y += line;
-        }
-
-        if (navigating) {
-            BlockPos next = client.getHudNextTarget();
-            if (next != null) {
-                graphics.drawString(mc.font, "Next: " + next.getX() + " " + next.getY() + " " + next.getZ(), x, y, WHITE, true);
-                y += line;
+        int failedRecalcs = client.getHudFailedRecalcCount();
+        int recalcCooldownTicks = client.getHudRecalcCooldownTicks();
+        if (failedRecalcs > 0) {
+            String cooldown = "";
+            if (recalcCooldownTicks > 0) {
+                double secs = recalcCooldownTicks / 20.0;
+                double secsRounded = Math.round(secs * 10.0) / 10.0;
+                cooldown = "  (" + secsRounded + "s)";
             }
-            int waypointsLeft = client.getHudWaypointsLeft();
-            if (waypointsLeft > 0) {
-                graphics.drawString(mc.font, "Waypoints: " + waypointsLeft, x, y, WHITE, true);
+            lines.add(Line.text(4,
+                    new Segment("[WARN]", TAG_TXT, TAG_WARN_BG),
+                    new Segment(" failed recalcs: ", TXT_VALUE),
+                    new Segment(String.valueOf(failedRecalcs), TXT_VALUE),
+                    new Segment(cooldown, TXT_MUTED)
+            ));
+        }
+
+        lines.add(Line.text(4,
+                client.shouldBridge()
+                        ? new Segment("OK", TAG_TXT, TAG_OK_BG)
+                        : new Segment("NO", TAG_TXT, TAG_NO_BG),
+                new Segment(" bridge", TXT_VALUE)
+        ));
+
+        lines.add(Line.text(0,
+                client.shouldPillar()
+                        ? new Segment("OK", TAG_TXT, TAG_OK_BG)
+                        : new Segment("NO", TAG_TXT, TAG_NO_BG),
+                new Segment(" pillar", TXT_VALUE)
+        ));
+
+        lines.add(Line.text(0,
+                client.shouldJump()
+                        ? new Segment("OK", TAG_TXT, TAG_OK_BG)
+                        : new Segment("NO", TAG_TXT, TAG_NO_BG),
+                new Segment(" jump", TXT_VALUE)
+        ));
+
+        lines.add(Line.text(0,
+                client.shouldPlaceUnderneath()
+                        ? new Segment("OK", TAG_TXT, TAG_OK_BG)
+                        : new Segment("NO", TAG_TXT, TAG_NO_BG),
+                new Segment(" place underneath", TXT_VALUE)
+        ));
+
+        int x0 = 5;
+        int y0 = 5;
+
+        int totalHeight = 0;
+        int maxWidth = 0;
+        for (Line line : lines) {
+            totalHeight += line.marginTop;
+            if (!line.separator) {
+                maxWidth = Math.max(maxWidth, lineWidth(mc, line));
+                totalHeight += mc.font.lineHeight;
+            } else {
+                totalHeight += 2;
             }
-        }*/
+        }
+
+        int panelW = (PADDING * 2) + maxWidth;
+        int panelH = (PADDING * 2) + totalHeight;
+        graphics.fill(x0 - 1, y0 - 1, x0 + panelW + 1, y0 + panelH + 1, PANEL_BORDER);
+        graphics.fill(x0, y0, x0 + panelW, y0 + panelH, PANEL_BG);
+
+        int x = x0 + PADDING;
+        int y = y0 + PADDING;
+        for (Line line : lines) {
+            y += line.marginTop;
+
+            if (line.separator) {
+                graphics.fill(x0 + PADDING, y, x0 + panelW - PADDING, y + 1, 0x44FFFFFF);
+                y += 2;
+                continue;
+            }
+
+            int cx = x;
+            for (Segment seg : line.segments) {
+                if (seg.bgColor != null) {
+                    int w = mc.font.width(seg.text) + TAG_PAD_X * 2;
+                    int h = mc.font.lineHeight;
+                    graphics.fill(cx, y - 1, cx + w, y + h, seg.bgColor);
+                    graphics.drawString(mc.font, seg.text, cx + TAG_PAD_X, y, seg.color, true);
+                    cx += w;
+                } else {
+                    graphics.drawString(mc.font, seg.text, cx, y, seg.color, true);
+                    cx += mc.font.width(seg.text);
+                }
+            }
+            y += mc.font.lineHeight;
+        }
     }
 }
