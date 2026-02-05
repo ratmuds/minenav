@@ -865,7 +865,7 @@ public class InteractionMixin {
                         }
                         costs[i] = cost;
                     } else {
-                        costs[i] = 50.0;
+                        costs[i] = 100.0;
                     }
                 }
             }
