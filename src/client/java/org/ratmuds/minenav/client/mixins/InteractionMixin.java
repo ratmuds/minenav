@@ -243,7 +243,7 @@ public class InteractionMixin {
                 return;
             }
 
-            path = cutLShapeCorners(newPath);
+            path = newPath; // cutLShapeCorners(newPath);
             pathOrigin = gridOriginForCalc;
 
             if (path == null) {
@@ -443,6 +443,8 @@ public class InteractionMixin {
     }
 
     private static boolean shouldDigDown(Player player, ClientLevel level, BlockPos target) {
+        if (player.getY() <= target.getY()) return false;
+
         Vec3 nextNodePos = getNextNodePos();
         float distSqr = new Vec2((float) nextNodePos.x, (float) nextNodePos.z)
                 .distanceToSqr(new Vec2((float) player.position().x, (float) player.position().z));
@@ -466,6 +468,10 @@ public class InteractionMixin {
         }
 
         return !(level.getBlockState(target.above(2)).getBlock() instanceof AirBlock);
+    }
+
+    private static boolean shouldDig(Player player, ClientLevel level, BlockPos target) {
+        return !(level.getBlockState(target).getBlock() instanceof AirBlock) || !(level.getBlockState(target.above()).getBlock() instanceof AirBlock);
     }
 
     private static void resetMovementKeys(Minecraft mc) {
@@ -505,6 +511,13 @@ public class InteractionMixin {
             return;
         }
 
+        if (shouldDig(player, level, target)) {
+            resetBridgeState();
+            client.updatePathfindingState(false, false, false, false);
+            doBreakBlocks(mc, player, target, level, "Breaking blocks... (" + waypointsLeft + " waypoints left)");
+            return;
+        }
+
         player.displayClientMessage(Component.literal("Navigating... (" + waypointsLeft + " waypoints left)"), true);
 
         if (player.getRotationVector().x == 90) {
@@ -524,7 +537,7 @@ public class InteractionMixin {
 
     private static boolean shouldJumpUp(Player player, ClientLevel level, BlockPos target) {
         // Check if we can jump
-        boolean blockAbove = !(level.getBlockState(target.above(2)).getBlock() instanceof AirBlock);
+        boolean blockAbove = !(level.getBlockState(target.above(2)).getBlock() instanceof AirBlock) || !(level.getBlockState(target.above()).getBlock() instanceof AirBlock);
         if (blockAbove) return false;
 
         return player.position().y < target.getY();
@@ -534,11 +547,7 @@ public class InteractionMixin {
         if (player.onGround()) return false;
         if (lastSolidBlockBelow == null) return false;
 
-        // Use the last grounded position so jumping doesn't change the decision mid-air.
-        double baseFeetY = lastSolidBlockBelow.getY() + 1.0;
-        if (target.getY() <= baseFeetY) return false;
-
-        boolean canJumpToTarget = baseFeetY + 1.25 >= target.getY();
+        boolean canJumpToTarget = lastSolidBlockBelow.getY() + 1.25 >= target.getY();
         boolean targetHasSupport = !(level.getBlockState(target.below()).getBlock() instanceof AirBlock);
         if (canJumpToTarget && targetHasSupport) return false;
 
@@ -595,6 +604,29 @@ public class InteractionMixin {
         player.displayClientMessage(Component.literal(statusMessage), true);
         aimAtBlockTop(player, lastSolidBlockBelow.above(2));
         player.setXRot(-90);
+
+        mc.options.keyUse.setDown(false);
+        mc.options.keyShift.setDown(false);
+        mc.options.keyDown.setDown(false);
+        mc.options.keyUp.setDown(false);
+        mc.options.keyJump.setDown(false);
+        mc.options.keyAttack.setDown(true);
+    }
+
+    private static void doBreakBlocks(Minecraft mc, Player player, BlockPos target, ClientLevel level, String statusMessage) {
+        BlockPos pos = null;
+
+        if (!(level.getBlockState(target).getBlock() instanceof AirBlock)) {
+            pos = target;
+        } else if (!(level.getBlockState(target.above()).getBlock() instanceof AirBlock)) {
+            pos = target.above();
+        }
+
+        if (pos == null) return;
+
+        player.displayClientMessage(Component.literal(statusMessage), true);
+        aimAtBlockTop(player, pos);
+        aimPitchAtBlockTop(player, pos);
 
         mc.options.keyUse.setDown(false);
         mc.options.keyShift.setDown(false);
