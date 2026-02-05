@@ -320,6 +320,20 @@ public class InteractionMixin {
         BlockPos target = BlockPos.containing(getNextNodePos());
         int waypointsLeft = path.size();
 
+        if (shouldDigDown(player, level, target)) {
+            resetBridgeState();
+            client.updatePathfindingState(false, false, false, false);
+            doDigDown(mc, player, "Digging block down... (" + waypointsLeft + " waypoints left)");
+            return;
+        }
+
+        if (shouldDigUp(player, level, target)) {
+            resetBridgeState();
+            client.updatePathfindingState(false, false, false, false);
+            doDigUp(mc, player, "Digging block up... (" + waypointsLeft + " waypoints left)");
+            return;
+        }
+
         if (shouldBridgeTo(level, target, player)) {
             boolean shouldPillarUp = shouldPillarUpWhileBridging(player);
             doBridging(mc, player, level, client, target, waypointsLeft, shouldPillarUp);
@@ -421,10 +435,7 @@ public class InteractionMixin {
         double dy = nextNodePos.y - player.getY();
 
         // Check if we should actually still bridge out a little bit
-        if (Math.abs(dy) < 0.001 || distSqr > 0.5f) {
-            MinenavClient.LOGGER.info("Skipping pillar up due to wrong position");
-            MinenavClient.LOGGER.info(String.valueOf(distSqr));
-            MinenavClient.LOGGER.info(String.valueOf(dy));
+        if (Math.abs(dy) < 0.001 || distSqr > 0.65f) {
             return false;
         }
 
@@ -432,7 +443,29 @@ public class InteractionMixin {
     }
 
     private static boolean shouldDigDown(Player player, ClientLevel level, BlockPos target) {
+        Vec3 nextNodePos = getNextNodePos();
+        float distSqr = new Vec2((float) nextNodePos.x, (float) nextNodePos.z)
+                .distanceToSqr(new Vec2((float) player.position().x, (float) player.position().z));
+
+        // Check if we actually should dig down
+        if (distSqr > 0.65f) {
+            return false;
+        }
+
         return !(level.getBlockState(target).getBlock() instanceof AirBlock);
+    }
+
+    private static boolean shouldDigUp(Player player, ClientLevel level, BlockPos target) {
+        Vec3 nextNodePos = getNextNodePos();
+        float distSqr = new Vec2((float) nextNodePos.x, (float) nextNodePos.z)
+                .distanceToSqr(new Vec2((float) player.position().x, (float) player.position().z));
+
+        // Check if we actually should dig up
+        if (distSqr > 0.65f) {
+            return false;
+        }
+
+        return !(level.getBlockState(target.above(2)).getBlock() instanceof AirBlock);
     }
 
     private static void resetMovementKeys(Minecraft mc) {
@@ -458,7 +491,7 @@ public class InteractionMixin {
         resetMovementKeys(mc);
         client.updatePathfindingState(false, false, false, false);
 
-        if (shouldJumpUp(player, target)) {
+        if (shouldJumpUp(player, level, target)) {
             resetBridgeState();
             client.updatePathfindingState(false, true, true, false);
             doPillarUp(mc, player, "Jumping... (" + waypointsLeft + " waypoints left)");
@@ -469,13 +502,6 @@ public class InteractionMixin {
             resetBridgeState();
             client.updatePathfindingState(false, false, false, true);
             doPlaceUnderneath(mc, player, "Placing block underneath... (" + waypointsLeft + " waypoints left)");
-            return;
-        }
-
-        if (shouldDigDown(player, level, target)) {
-            resetBridgeState();
-            client.updatePathfindingState(false, false, false, false);
-            doDigDown(mc, player, "Digging block down... (" + waypointsLeft + " waypoints left)");
             return;
         }
 
@@ -496,8 +522,12 @@ public class InteractionMixin {
         }
     }
 
-    private static boolean shouldJumpUp(Player player, BlockPos target) {
-        return player.onGround() && player.position().y < target.getY();
+    private static boolean shouldJumpUp(Player player, ClientLevel level, BlockPos target) {
+        // Check if we can jump
+        boolean blockAbove = !(level.getBlockState(target.above(2)).getBlock() instanceof AirBlock);
+        if (blockAbove) return false;
+
+        return player.position().y < target.getY();
     }
 
     private static boolean shouldPlaceUnderneath(Player player, ClientLevel level, BlockPos target) {
@@ -551,6 +581,20 @@ public class InteractionMixin {
     private static void doDigDown(Minecraft mc, Player player, String statusMessage) {
         player.displayClientMessage(Component.literal(statusMessage), true);
         aimAtBlockTop(player, lastSolidBlockBelow);
+        aimPitchAtBlockTop(player, lastSolidBlockBelow);
+
+        mc.options.keyUse.setDown(false);
+        mc.options.keyShift.setDown(false);
+        mc.options.keyDown.setDown(false);
+        mc.options.keyUp.setDown(false);
+        mc.options.keyJump.setDown(false);
+        mc.options.keyAttack.setDown(true);
+    }
+
+    private static void doDigUp(Minecraft mc, Player player, String statusMessage) {
+        player.displayClientMessage(Component.literal(statusMessage), true);
+        aimAtBlockTop(player, lastSolidBlockBelow.above(2));
+        player.setXRot(-90);
 
         mc.options.keyUse.setDown(false);
         mc.options.keyShift.setDown(false);
@@ -668,7 +712,7 @@ public class InteractionMixin {
                         if (y - 1 >= 0 && isAir[index(sizeY, sizeZ, x, y - 1, z)] == 1) {
                             cost += 10.0;
                             if (y - 2 >= 0 && isAir[index(sizeY, sizeZ, x, y - 2, z)] == 1) {
-                                cost += 100.0;
+                                cost += 30.0;
                             }
                         }
                         costs[i] = cost;
