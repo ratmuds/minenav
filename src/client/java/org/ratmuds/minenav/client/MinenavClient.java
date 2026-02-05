@@ -15,10 +15,27 @@ import java.util.List;
 public class MinenavClient implements ClientModInitializer {
     public static final Logger LOGGER = LoggerFactory.getLogger("minenav");
     private static MinenavClient instance;
+
+    public enum PathfinderAlgorithm {
+        ASTAR("A*"),
+        ANYTIME_DSTAR("Anytime D*");
+
+        private final String label;
+
+        PathfinderAlgorithm(String label) {
+            this.label = label;
+        }
+
+        public String label() {
+            return label;
+        }
+    }
+
     private CubeRenderer cubeRenderer;
     private boolean isNavigating = false;
     private Vec3 startPos;
     private Vec3 endPos;
+    private PathfinderAlgorithm pathfinderAlgorithm = PathfinderAlgorithm.ASTAR;
 
     private boolean hudCalculatingPath = false;
     private int hudWaypointsLeft = 0;
@@ -78,6 +95,14 @@ public class MinenavClient implements ClientModInitializer {
 
     public Vec3 getEndPos() {
         return endPos;
+    }
+
+    public PathfinderAlgorithm getPathfinderAlgorithm() {
+        return pathfinderAlgorithm;
+    }
+
+    public void setPathfinderAlgorithm(PathfinderAlgorithm algorithm) {
+        this.pathfinderAlgorithm = (algorithm == null) ? PathfinderAlgorithm.ASTAR : algorithm;
     }
 
     public boolean isHudCalculatingPath() {

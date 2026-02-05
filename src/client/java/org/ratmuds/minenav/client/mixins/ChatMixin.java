@@ -43,6 +43,34 @@ public class ChatMixin {
             } else if (command.equalsIgnoreCase("end")) {
                 MinenavClient.getInstance().setEndPos(player.position());
                 player.displayClientMessage(Component.literal(String.format("End set to (%.1f, %.1f, %.1f)", player.position().x, player.position().y, player.position().z)), true);
+            } else if (command.equalsIgnoreCase("algo") || command.equalsIgnoreCase("algorithm") || command.equalsIgnoreCase("pathfinder")) {
+                if (parts.length < 2) {
+                    var current = MinenavClient.getInstance().getPathfinderAlgorithm();
+                    player.displayClientMessage(Component.literal("Pathfinder: " + current.label() + " (use: #algo astar|adstar)"), true);
+                    ci.cancel();
+                    return;
+                }
+
+                String a = parts[1].trim().toLowerCase();
+                if (a.equals("astar") || a.equals("a*") || a.equals("a")) {
+                    MinenavClient.getInstance().setPathfinderAlgorithm(MinenavClient.PathfinderAlgorithm.ASTAR);
+                } else if (a.equals("adstar") || a.equals("anytime") || a.equals("dstar") || a.equals("d*") || a.equals("anytime_dstar")) {
+                    MinenavClient.getInstance().setPathfinderAlgorithm(MinenavClient.PathfinderAlgorithm.ANYTIME_DSTAR);
+                } else if (a.equals("toggle") || a.equals("cycle")) {
+                    var current = MinenavClient.getInstance().getPathfinderAlgorithm();
+                    MinenavClient.getInstance().setPathfinderAlgorithm(
+                            current == MinenavClient.PathfinderAlgorithm.ASTAR
+                                    ? MinenavClient.PathfinderAlgorithm.ANYTIME_DSTAR
+                                    : MinenavClient.PathfinderAlgorithm.ASTAR
+                    );
+                } else {
+                    player.displayClientMessage(Component.literal("Unknown algo: " + parts[1] + " (use: #algo astar|adstar|toggle)"), true);
+                    ci.cancel();
+                    return;
+                }
+
+                var now = MinenavClient.getInstance().getPathfinderAlgorithm();
+                player.displayClientMessage(Component.literal("Pathfinder set to " + now.label()), true);
             } else if (command.equalsIgnoreCase("mine")) {
                 String query = raw.substring(command.length()).trim();
                 if (query.isEmpty()) {

@@ -154,6 +154,12 @@ final class MinenavHud {
         lines.add(Line.separator(8));
         lines.add(Line.text(4, new Segment("pathfinding", TXT_TITLE)));
 
+        lines.add(Line.text(4,
+                new Segment("[algo]", TXT_LABEL),
+                new Segment(" ", TXT_MUTED),
+                new Segment(client.getPathfinderAlgorithm().label(), TXT_VALUE)
+        ));
+
         if (client.isHudCalculatingPath()) {
             lines.add(Line.text(4, new Segment("CALC", TAG_TXT, TAG_WARN_BG), new Segment(" recalculating", TXT_VALUE)));
         }

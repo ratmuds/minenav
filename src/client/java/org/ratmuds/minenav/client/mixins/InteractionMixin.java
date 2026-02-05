@@ -17,6 +17,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec2;
 import net.minecraft.world.phys.Vec3;
 import org.ratmuds.minenav.client.AStar3D;
+import org.ratmuds.minenav.client.AnytimeDStar3D;
 import org.ratmuds.minenav.client.CubeData;
 import org.ratmuds.minenav.client.MinenavClient;
 import org.ratmuds.minenav.client.PathGridSnapshot;
@@ -47,16 +48,17 @@ public class InteractionMixin {
     private static BlockPos lastSolidBlockBelow = null;
 
     private static final int RECALC_INTERVAL_TICKS = 20;
-    private static final int CALC_TIMEOUT_TICKS = 120;
+    private static final int CALC_TIMEOUT_TICKS = 1200;
     private static final int GRID_TTL_TICKS = 40;
-    private static final int MAX_GRID_CELLS = 350_000;
-    private static final int MAX_EXPANDED_NODES = 250_000;
+    private static final int MAX_GRID_CELLS = 3_500_000;
+    private static final int MAX_EXPANDED_NODES = 2_500_000;
 
     private static long nextRecalcGameTime = 0;
     private static int failedRecalcCount = 0;
 
     private static BlockPos lastRequestedStart = null;
     private static BlockPos lastRequestedEnd = null;
+    private static MinenavClient.PathfinderAlgorithm lastRequestedAlgo = null;
 
     private static PathGridSnapshot cachedGrid = null;
     private static CompletableFuture<List<int[]>> inFlight = null;
@@ -123,6 +125,7 @@ public class InteractionMixin {
         pathOrigin = null;
         lastRequestedStart = null;
         lastRequestedEnd = null;
+        lastRequestedAlgo = null;
         failedRecalcCount = 0;
         nextRecalcGameTime = 0;
         cachedGrid = null;
@@ -147,6 +150,7 @@ public class InteractionMixin {
 
     private static void maybeShowRecalculating(Player player) {
         if (!isCalculating.get()) return;
+        if (path != null && path.size() > 1) return;
         if (tickCounter % 10 != 0) return;
         player.displayClientMessage(Component.literal("Recalculating path..."), true);
     }
@@ -154,11 +158,14 @@ public class InteractionMixin {
     private static void maybeStartPathfinding(Minecraft mc, Player player, ClientLevel level, MinenavClient client, Vec3 start, Vec3 end, long gameTime) {
         BlockPos startBlock = player.blockPosition();
         BlockPos endBlock = BlockPos.containing(end);
+        MinenavClient.PathfinderAlgorithm algo = client.getPathfinderAlgorithm();
 
         boolean startOrEndChanged = lastRequestedStart == null
                 || lastRequestedEnd == null
                 || !lastRequestedStart.equals(startBlock)
-                || !lastRequestedEnd.equals(endBlock);
+                || !lastRequestedEnd.equals(endBlock)
+                || lastRequestedAlgo == null
+                || lastRequestedAlgo != algo;
 
         boolean needsPath = path == null || pathOrigin == null || path.size() < 2;
         boolean canRecalcNow = !isCalculating.get()
@@ -192,6 +199,7 @@ public class InteractionMixin {
 
         lastRequestedStart = startBlock;
         lastRequestedEnd = endBlock;
+        lastRequestedAlgo = algo;
 
         PathGridSnapshot grid = cachedGrid;
         boolean reuseGrid = grid != null
@@ -224,6 +232,36 @@ public class InteractionMixin {
             if (costs == null) {
                 costs = buildCosts(gridForCalc.isAir, gridForCalc.sizeX, gridForCalc.sizeY, gridForCalc.sizeZ);
                 gridForCalc.costs = costs;
+            }
+            if (algo == MinenavClient.PathfinderAlgorithm.ANYTIME_DSTAR) {
+                AnytimeDStar3D finder = new AnytimeDStar3D(
+                        costs,
+                        gridForCalc.sizeX, gridForCalc.sizeY, gridForCalc.sizeZ,
+                        startX, startY, startZ,
+                        endX, endY, endZ
+                );
+
+                int budget = MAX_EXPANDED_NODES;
+                long lastUpdate = System.currentTimeMillis();
+
+                while (!finder.isDone() && budget > 0) {
+                    if (Thread.currentThread().isInterrupted()) throw new CancellationException();
+
+                    int expanded = finder.iterate(2500);
+                    budget -= expanded;
+
+                    if (expanded == 0 && !finder.isDone()) break;
+
+                    long now = System.currentTimeMillis();
+                    if (now - lastUpdate > 50 && finder.hasPath()) { // 20 updates/sec max
+                        lastUpdate = now;
+                        List<int[]> intermediate = finder.extractPath();
+                        if (intermediate != null) {
+                            mc.execute(() -> updateActivePath(intermediate, gridOriginForCalc, requestId));
+                        }
+                    }
+                }
+                return finder.extractPath();
             }
             return AStar3D.findPath(
                     costs,
@@ -269,6 +307,54 @@ public class InteractionMixin {
         }, mc);
     }
 
+    private static void updateActivePath(List<int[]> newPath, Vec3 newOrigin, int requestId) {
+        if (requestId != calcRequestId.get()) return;
+        if (newPath == null || newPath.isEmpty()) return;
+
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.player == null) return;
+
+        // Try to splice with existing path if possible to maintain continuity
+        if (path != null && pathOrigin != null && path.size() > 1) {
+            Vec3 currentTarget = getNextNodePos();
+
+            // Find the node in the new path that matches our current target
+            int bestIdx = -1;
+            double bestDistSq = 1.0; // Tolerance
+
+            for (int i = 0; i < newPath.size(); i++) {
+                int[] node = newPath.get(i);
+                double dx = (newOrigin.x + node[0]) - currentTarget.x;
+                double dy = (newOrigin.y + node[1]) - currentTarget.y;
+                double dz = (newOrigin.z + node[2]) - currentTarget.z;
+                double distSq = dx * dx + dy * dy + dz * dz;
+
+                if (distSq < bestDistSq) {
+                    bestDistSq = distSq;
+                    bestIdx = i;
+                }
+            }
+
+            if (bestIdx > 0) {
+                // Found a matching node. Splice the new path from the previous node (current position approximation)
+                path = new ArrayList<>(newPath.subList(bestIdx - 1, newPath.size()));
+                pathOrigin = newOrigin;
+                renderPathCubes(MinenavClient.getInstance(), path, pathOrigin);
+                return;
+            }
+        }
+
+        // Fallback: Replace entirely
+        path = newPath;
+        pathOrigin = newOrigin;
+
+        // Trim path that is too close to the player
+        while (path.size() >= 2 && getNextNodePos().distanceTo(mc.player.position()) < 0.5) {
+            path.removeFirst();
+        }
+        renderPathCubes(MinenavClient.getInstance(), path, pathOrigin);
+    }
+
     private static PathGridSnapshot buildGridSnapshot(ClientLevel level, int minX, int minY, int minZ, int sizeX, int sizeY, int sizeZ, int cells, long gameTime) {
         BlockPos.MutableBlockPos mutable = new BlockPos.MutableBlockPos();
         byte[] isAir = new byte[cells];
@@ -282,6 +368,11 @@ public class InteractionMixin {
                     mutable.set(worldX, worldY, worldZ);
                     BlockState state = level.getBlockState(mutable);
                     isAir[idx++] = (byte) (state.getBlock() instanceof AirBlock ? 1 : 0);
+
+                    // If it's water just consider as air
+                    if (!state.getFluidState().isEmpty()) {
+                        isAir[idx - 1] = (byte) 1;
+                    }
                 }
             }
         }
@@ -623,7 +714,15 @@ public class InteractionMixin {
 
     private static void doJumpUp(Minecraft mc, Player player, BlockPos target, String statusMessage) {
         player.displayClientMessage(Component.literal(statusMessage), true);
-        aimAtBlockTop(player, target);
+
+        BlockPos walkTarget = target;
+        if (path == null || pathOrigin == null || path.size() <= 3) {
+            // use regular target
+        } else {
+            walkTarget = BlockPos.containing(pathOrigin.x + path.get(2)[0], pathOrigin.y + path.get(2)[1], pathOrigin.z + path.get(2)[2]);
+        }
+
+        aimAtBlockTop(player, walkTarget);
         mc.options.keyJump.setDown(true);
         mc.options.keyUse.setDown(false);
         mc.options.keyShift.setDown(false);
@@ -902,9 +1001,9 @@ public class InteractionMixin {
                     if (isAir[i] == 1) {
                         double cost = 1.0;
                         if (y - 1 >= 0 && isAir[index(sizeY, sizeZ, x, y - 1, z)] == 1) {
-                            cost += 10.0;
+                            cost += 25.0;
                             if (y - 2 >= 0 && isAir[index(sizeY, sizeZ, x, y - 2, z)] == 1) {
-                                cost += 30.0;
+                                cost += 40.0;
                             }
                         }
                         costs[i] = cost;
