@@ -22,7 +22,7 @@ import net.minecraft.client.gui.screens.ChatScreen;
 public class ChatMixin {
     @Inject(at = @At("HEAD"), method = "handleChatInput", cancellable = true)
     private void onChat(String message, boolean bl, CallbackInfo ci) {
-        if (message.startsWith("#")) {
+        if (message.startsWith("!")) {
             Minecraft mc = Minecraft.getInstance();
             if (mc == null || mc.player == null || mc.level == null) return;
             Player player = mc.player;
@@ -46,7 +46,7 @@ public class ChatMixin {
             } else if (command.equalsIgnoreCase("algo") || command.equalsIgnoreCase("algorithm") || command.equalsIgnoreCase("pathfinder")) {
                 if (parts.length < 2) {
                     var current = MinenavClient.getInstance().getPathfinderAlgorithm();
-                    player.displayClientMessage(Component.literal("Pathfinder: " + current.label() + " (use: #algo astar|adstar)"), true);
+                    player.displayClientMessage(Component.literal("Pathfinder: " + current.label() + " (use: !algo astar|adstar)"), true);
                     ci.cancel();
                     return;
                 }
@@ -64,7 +64,7 @@ public class ChatMixin {
                                     : MinenavClient.PathfinderAlgorithm.ASTAR
                     );
                 } else {
-                    player.displayClientMessage(Component.literal("Unknown algo: " + parts[1] + " (use: #algo astar|adstar|toggle)"), true);
+                    player.displayClientMessage(Component.literal("Unknown algo: " + parts[1] + " (use: !algo astar|adstar|toggle)"), true);
                     ci.cancel();
                     return;
                 }
@@ -74,7 +74,7 @@ public class ChatMixin {
             } else if (command.equalsIgnoreCase("mine")) {
                 String query = raw.substring(command.length()).trim();
                 if (query.isEmpty()) {
-                    player.displayClientMessage(Component.literal("Usage: #mine <block> (e.g. #mine dirt)"), true);
+                    player.displayClientMessage(Component.literal("Usage: !mine <block> (e.g. !mine dirt)"), true);
                     ci.cancel();
                     return;
                 }
@@ -89,7 +89,7 @@ public class ChatMixin {
                 Block targetBlock = match.get();
                 BlockPos origin = player.blockPosition();
 
-                BlockPos target = findNearestBlock(level, origin, targetBlock, 48, 24);
+                BlockPos target = findNearestBlock(level, origin, targetBlock, 512, 128);
                 if (target == null) {
                     player.displayClientMessage(Component.literal("No " + query + " found nearby (search radius ~48)"), true);
                     ci.cancel();
@@ -153,38 +153,5 @@ public class ChatMixin {
         }
 
         return best;
-    }
-
-    private static BlockPos findStandPositionAdjacent(ClientLevel level, BlockPos origin, BlockPos target) {
-        BlockPos best = null;
-        long bestDist2 = Long.MAX_VALUE;
-
-        for (Direction dir : Direction.values()) {
-            if (dir == Direction.DOWN) continue;
-            BlockPos pos = target.relative(dir);
-            if (!isStandable(level, pos)) continue;
-
-            long dx = (long) pos.getX() - (long) origin.getX();
-            long dy = (long) pos.getY() - (long) origin.getY();
-            long dz = (long) pos.getZ() - (long) origin.getZ();
-            long dist2 = dx * dx + dy * dy + dz * dz;
-            if (dist2 < bestDist2) {
-                bestDist2 = dist2;
-                best = pos;
-            }
-        }
-
-        return best;
-    }
-
-    private static boolean isStandable(ClientLevel level, BlockPos pos) {
-        BlockState feetState = level.getBlockState(pos);
-        if (!(feetState.getBlock() instanceof AirBlock)) return false;
-
-        BlockState headState = level.getBlockState(pos.above());
-        if (!(headState.getBlock() instanceof AirBlock)) return false;
-
-        BlockState support = level.getBlockState(pos.below());
-        return !(support.getBlock() instanceof AirBlock);
     }
 }

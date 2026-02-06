@@ -88,6 +88,8 @@ final class MinenavHud {
         MinenavClient client = MinenavClient.getInstance();
         if (client == null) return;
 
+        if (!client.isNavigating()) return;
+
         List<Line> lines = new ArrayList<>();
         lines.add(Line.text(0,
                 new Segment("minenav", TXT_TITLE),
