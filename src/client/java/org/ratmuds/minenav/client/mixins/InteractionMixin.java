@@ -632,6 +632,17 @@ public class InteractionMixin {
         resetMovementKeys(mc);
         client.updateHudActionState("walk", target, player.getInventory().getSelectedSlot());
 
+        if (shouldDig(player, level, target)) {
+            resetBridgeState();
+            BlockPos breakPos = firstNonAirBreakPos(level, target);
+            if (breakPos != null) {
+                ensureBestToolSelected(player, level.getBlockState(breakPos));
+            }
+            client.updateHudActionState("break", breakPos, player.getInventory().getSelectedSlot());
+            doBreakBlocks(mc, player, target, level, "Breaking blocks... (" + waypointsLeft + " waypoints left)");
+            return;
+        }
+
         if (shouldJumpUp(player, level, target)) {
             resetBridgeState();
             ensurePlaceBlockSelected(player, level);
@@ -645,17 +656,6 @@ public class InteractionMixin {
             ensurePlaceBlockSelected(player, level);
             client.updateHudActionState("place_under", lastSolidBlockBelow, player.getInventory().getSelectedSlot());
             doPlaceUnderneath(mc, player, "Placing block underneath... (" + waypointsLeft + " waypoints left)");
-            return;
-        }
-
-        if (shouldDig(player, level, target)) {
-            resetBridgeState();
-            BlockPos breakPos = firstNonAirBreakPos(level, target);
-            if (breakPos != null) {
-                ensureBestToolSelected(player, level.getBlockState(breakPos));
-            }
-            client.updateHudActionState("break", breakPos, player.getInventory().getSelectedSlot());
-            doBreakBlocks(mc, player, target, level, "Breaking blocks... (" + waypointsLeft + " waypoints left)");
             return;
         }
 
