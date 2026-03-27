@@ -3,10 +3,15 @@
   "id": "minenav",
   "version": "${version}",
   "name": "minenav",
-  "description": "",
-  "authors": [],
-  "contact": {},
-  "license": "All-Rights-Reserved",
+  "description": "A Minecraft pathfinding mod using A* and Anytime D* algorithms for automated navigation",
+  "authors": [
+    "ratmuds"
+  ],
+  "contact": {
+    "homepage": "https://github.com/ratmuds/minenav",
+    "sources": "https://github.com/ratmuds/minenav"
+  },
+  "license": "MIT",
   "icon": "assets/minenav/icon.png",
   "environment": "client",
   "entrypoints": {

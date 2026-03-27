@@ -1,3 +1,0 @@
- - Add Anytime D Lite*
- - Cache world data into byte array
- - Navigate world in precision within 3 chunks, otherwise use nearest neighbor
