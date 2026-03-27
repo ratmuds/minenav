@@ -2,7 +2,7 @@
 
 # minenav
 
-minenav is a small project that was heavily inspired by [Baritone](https://github.com/cabaletta/baritone) and what you should use if you actually want a reliable pathfinder bot for Minecraft.
+minenav is a small project that was heavily inspired by [Baritone](https://github.com/cabaletta/baritone). You should use Baritone if you actually want a reliable pathfinder bot for Minecraft.
 
 ## features
  - navigates terrain
